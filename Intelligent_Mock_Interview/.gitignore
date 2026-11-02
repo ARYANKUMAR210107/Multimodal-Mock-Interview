@@ -1,0 +1,57 @@
+# Python virtual environment
+venv/
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.Python
+*.egg
+*.egg-info/
+dist/
+build/
+.eggs/
+
+# Jupyter Notebook checkpoints
+.ipynb_checkpoints/
+*.ipynb_checkpoints
+
+# Data files - large archives (do not commit)
+dataset/openended/wav.zip
+dataset/common_voice/
+*.zip
+*.tar.gz
+*.tar.bz2
+
+# Model checkpoints and binary files
+
+
+models/*.h5
+models/*.pt
+models/*.bin
+
+# OS files
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# IDE files
+.vscode/
+.idea/
+*.code-workspace
+
+# Environment and secrets
+.env
+.env.*
+*.pem
+*.key
+
+# Logs and temp
+*.log
+logs/
+tmp/
+temp/
+
+
+# HuggingFace cache
+.cache/
+

@@ -1,0 +1,129 @@
+{
+  "features": [
+    "MANNER OF SPEAKING",
+    "MENTAL ALERTNESS",
+    "SELF-CONFIDENCE",
+    "ABILITY TO PRESENT IDEAS",
+    "COMMUNICATION SKILLS",
+    "soft_skill_mean",
+    "soft_skill_min"
+  ],
+  "target_encoding": {
+    "Employable": 1,
+    "LessEmployable": 0
+  },
+  "best_model": "Gradient Boosting",
+  "best_model_file": "gradient_boosting_employability.joblib",
+  "excluded_features": [
+    "Name of Student",
+    "GENERAL APPEARANCE",
+    "PHYSICAL CONDITION",
+    "Student Performance Rating"
+  ],
+  "exclusion_reasons": {
+    "Name of Student": "Identifier \u2014 not a feature",
+    "GENERAL APPEARANCE": "Excluded per project instruction (appearance feature)",
+    "PHYSICAL CONDITION": "Excluded per project instruction (physical feature)",
+    "Student Performance Rating": "Near-zero correlation with target (r=-0.0008). Decision Tree on SPR alone achieves only 57.98% accuracy (same as majority-class baseline). Excluded to avoid ambiguous collinear opinion variable."
+  },
+  "val_results": {
+    "Logistic Regression": {
+      "accuracy": 0.5795644891122278,
+      "precision": 0.6567656765676567,
+      "recall": 0.5751445086705202,
+      "f1_binary": 0.613251155624037,
+      "f1_macro": 0.5763503484542203,
+      "roc_auc": 0.6000736936646478
+    },
+    "Decision Tree": {
+      "accuracy": 0.6432160804020101,
+      "precision": 0.752851711026616,
+      "recall": 0.5722543352601156,
+      "f1_binary": 0.6502463054187192,
+      "f1_macro": 0.6430718706580776,
+      "roc_auc": 0.7069295074039104
+    },
+    "Random Forest": {
+      "accuracy": 0.7051926298157454,
+      "precision": 0.785234899328859,
+      "recall": 0.6763005780346821,
+      "f1_binary": 0.7267080745341615,
+      "f1_macro": 0.7033540372670808,
+      "roc_auc": 0.8075098450130116
+    },
+    "SVM": {
+      "accuracy": 0.7303182579564489,
+      "precision": 0.7591036414565826,
+      "recall": 0.7832369942196532,
+      "f1_binary": 0.7709815078236131,
+      "f1_macro": 0.7215396337488738,
+      "roc_auc": 0.7700297077585612
+    },
+    "Gradient Boosting": {
+      "accuracy": 0.7638190954773869,
+      "precision": 0.7530864197530864,
+      "recall": 0.8815028901734104,
+      "f1_binary": 0.8122503328894807,
+      "f1_macro": 0.7469829542551241,
+      "roc_auc": 0.8347074131220782
+    },
+    "KNN": {
+      "accuracy": 0.6917922948073701,
+      "precision": 0.7354651162790697,
+      "recall": 0.7312138728323699,
+      "f1_binary": 0.7333333333333333,
+      "f1_macro": 0.6841269841269841,
+      "roc_auc": 0.7897945789097943
+    }
+  },
+  "test_results": {
+    "Logistic Regression": {
+      "accuracy": 0.592964824120603,
+      "precision": 0.660436137071651,
+      "recall": 0.6127167630057804,
+      "f1_binary": 0.6356821589205397,
+      "f1_macro": 0.5872907948302888,
+      "roc_auc": 0.6315662206664671
+    },
+    "Decision Tree": {
+      "accuracy": 0.6984924623115578,
+      "precision": 0.7139175257731959,
+      "recall": 0.8005780346820809,
+      "f1_binary": 0.7547683923705722,
+      "f1_macro": 0.6817320222722427,
+      "roc_auc": 0.7766160790364554
+    },
+    "Random Forest": {
+      "accuracy": 0.7420435510887772,
+      "precision": 0.7696629213483146,
+      "recall": 0.791907514450867,
+      "f1_binary": 0.7806267806267806,
+      "f1_macro": 0.7338093252727399,
+      "roc_auc": 0.8131980747530111
+    },
+    "SVM": {
+      "accuracy": 0.7587939698492462,
+      "precision": 0.7439613526570048,
+      "recall": 0.8901734104046243,
+      "f1_binary": 0.8105263157894737,
+      "f1_macro": 0.7393645403832161,
+      "roc_auc": 0.7925868779218386
+    },
+    "Gradient Boosting": {
+      "accuracy": 0.7688442211055276,
+      "precision": 0.7418604651162791,
+      "recall": 0.9219653179190751,
+      "f1_binary": 0.8221649484536082,
+      "f1_macro": 0.746010703891876,
+      "roc_auc": 0.8248278562052368
+    },
+    "KNN": {
+      "accuracy": 0.711892797319933,
+      "precision": 0.757396449704142,
+      "recall": 0.7398843930635838,
+      "f1_binary": 0.7485380116959064,
+      "f1_macro": 0.705641554867561,
+      "roc_auc": 0.7848893443566773
+    }
+  }
+}

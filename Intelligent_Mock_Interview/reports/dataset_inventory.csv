@@ -1,0 +1,12 @@
+dataset_name,file_name,file_format,file_size,record_count,column_count,target_variable,status,purpose
+Student Employability,Student-Employability-Datasets.xlsx,Excel (.xlsx),135 KB,2982,10,CLASS (Employable / LessEmployable),Available,Employability prediction (binary classification)
+AI Interview Questions (Train),train-00000-of-00001.parquet,Parquet,769 KB,4653,1,None (unsupervised / reference),Available,Interview Q&A reference for answer scoring
+AI Interview Questions (Eval),eval-00000-of-00001.parquet,Parquet,195 KB,1164,1,None (unsupervised / reference),Available,Interview Q&A reference for answer scoring
+OpenEnded – Gemini Train Labels,gemini2_train.csv,CSV,143 KB,6109,4,"Accuracy, Fluency, Prosody (int scores 1–5)",Available,Speech quality scoring – AI-labeled training set
+OpenEnded – Gemini Dev Labels,gemini2_dev.csv,CSV,63 KB,2673,4,"Accuracy, Fluency, Prosody (int scores 1–5)",Available,Speech quality scoring – AI-labeled validation set
+OpenEnded – Human Test Labels,human_test.csv,CSV,59 KB,1000,13,"Accuracy, Fluency, Prosody (float averages)",Available,Speech quality scoring – Human-annotated gold standard
+OpenEnded – Metadata,meta_data.csv,CSV,1018 KB,9782,4,None (metadata linking file),Available,Links recordings to questions and split assignments
+OpenEnded – Audio Archive,wav.zip,ZIP archive,~6.71 GB,~9782 audio files,N/A,N/A,NOT DOWNLOADED – requires 8-10 GB free disk space,Speech feature extraction (MFCC / Prosody analysis)
+Mozilla Common Voice (English),N/A,N/A,~5–7 GB (compressed),~2400 hours audio,N/A,N/A,NOT DOWNLOADED – placeholder folder created,ASR / speech transcription experiments
+Custom Interview Template,interview_answer_assessment_template.csv,CSV,<1 KB,0 (template only),9,human_evaluator_label,Template created – no data yet,Custom answer quality assessment ground truth
+

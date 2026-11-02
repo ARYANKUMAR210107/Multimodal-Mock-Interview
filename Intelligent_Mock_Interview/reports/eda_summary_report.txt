@@ -1,0 +1,209 @@
+
+======================================================================
+  DATASET A — STUDENT EMPLOYABILITY
+======================================================================
+  Shape : (2982, 10)
+
+  Columns : ['Name of Student', 'GENERAL APPEARANCE', 'MANNER OF SPEAKING', 'PHYSICAL CONDITION', 'MENTAL ALERTNESS', 'SELF-CONFIDENCE', 'ABILITY TO PRESENT IDEAS', 'COMMUNICATION SKILLS', 'Student Performance Rating', 'CLASS']
+
+  Missing values:
+Name of Student               0
+GENERAL APPEARANCE            0
+MANNER OF SPEAKING            0
+PHYSICAL CONDITION            0
+MENTAL ALERTNESS              0
+SELF-CONFIDENCE               0
+ABILITY TO PRESENT IDEAS      0
+COMMUNICATION SKILLS          0
+Student Performance Rating    0
+CLASS                         0
+
+  Duplicates : 0
+
+  Target distribution:
+CLASS
+Employable        1729
+LessEmployable    1253
+
+  Class proportions:
+CLASS
+Employable        0.58
+LessEmployable    0.42
+
+  Descriptive stats:
+       GENERAL APPEARANCE  MANNER OF SPEAKING  PHYSICAL CONDITION  MENTAL ALERTNESS  SELF-CONFIDENCE  ABILITY TO PRESENT IDEAS  COMMUNICATION SKILLS  Student Performance Rating
+count             2982.00             2982.00             2982.00           2982.00          2982.00                   2982.00               2982.00                     2982.00
+mean                 4.25                3.88                3.97              3.96             3.91                      3.81                  3.53                        4.61
+std                  0.68                0.76                0.74              0.78             0.81                      0.74                  0.74                        0.69
+min                  2.00                2.00                2.00              2.00             2.00                      2.00                  2.00                        3.00
+25%                  4.00                3.00                3.00              3.00             3.00                      3.00                  3.00                        4.00
+50%                  4.00                4.00                4.00              4.00             4.00                      4.00                  3.00                        5.00
+75%                  5.00                4.00                5.00              5.00             5.00                      4.00                  4.00                        5.00
+max                  5.00                5.00                5.00              5.00             5.00                      5.00                  5.00                        5.00
+  [SAVED] A1_class_distribution.png
+  [SAVED] A2_feature_distributions.png
+  [SAVED] A3_feature_by_class.png
+  [SAVED] A4_correlation_heatmap.png
+  [SAVED] A5_boxplots_by_class.png
+  [SAVED] A6_mean_scores_by_class.png
+
+  Key Findings:
+  - Perfectly clean dataset: 0 missing, 0 duplicates
+  - Moderate class imbalance: 58% Employable vs 42% LessEmployable
+  - All features rated on 2–5 Likert scale (no 1-rated records)
+  - Mean scores are notably higher for Employable class across all features
+  - COMMUNICATION SKILLS has the lowest mean (3.53) — most discriminating feature
+  - Student Performance Rating shows very high mean (4.61) for both classes
+  - 'Name of Student' must be dropped before ML training
+
+======================================================================
+  DATASET B — AI INTERVIEW QUESTIONS
+======================================================================
+  Train shape : (4653, 1)
+  Eval  shape : (1164, 1)
+  Columns     : ['text']
+  Missing (train) : text    0
+  Missing (eval)  : text    0
+
+  === Train Split — Text Length Stats ===
+        q_len   a_len  q_char  a_char
+count  4653.0  4653.0  4653.0  4653.0
+mean     11.6    37.4    74.1   255.9
+std       3.6    13.5    24.3    92.5
+min       3.0     3.0    13.0    19.0
+25%       9.0    26.0    59.0   177.0
+50%      11.0    38.0    72.0   262.0
+75%      13.0    47.0    86.0   319.0
+max      42.0   137.0   281.0   959.0
+
+  === Eval Split — Text Length Stats ===
+        q_len   a_len  q_char  a_char
+count  1164.0  1164.0  1164.0  1164.0
+mean     11.5    37.1    73.7   253.8
+std       3.7    13.9    25.2    95.5
+min       3.0     3.0    12.0    19.0
+25%       9.0    26.0    58.0   173.0
+50%      11.0    37.0    71.0   257.0
+75%      13.0    46.0    86.0   317.0
+max      45.0   125.0   314.0   866.0
+
+  Empty questions (train): 0
+  Empty answers   (train): 0
+  [SAVED] B1_split_sizes.png
+  [SAVED] B2_qa_length_distributions.png
+  [SAVED] B3_top_words.png
+  [SAVED] B4_question_types.png
+  [SAVED] B5_answer_len_by_qtype.png
+
+  Key Findings:
+  - Total: 5,817 Q&A pairs (train: 4,653 / eval: 1,164)
+  - Train: mean Q=11.6 words, mean A=37.4 words
+  - Eval : mean Q=11.5 words, mean A=37.1 words
+  - Question types distribution: {'What': 2627, 'How': 1382, 'Explain': 203, 'Other': 144, 'Describe': 111, 'Why': 97, 'Discuss': 34, 'Which': 24, 'When': 19, 'Can/Could': 9, 'Define': 2, 'Who': 1}
+  - Most common question starters: 'What', 'How', 'Why'
+  - All records parse cleanly — 0 empty Q or A after [INST] parsing
+  - FORMAT: [INST]...[/INST] tags must be stripped before any NLP task
+  - LIMITATION: No topic/difficulty labels; only raw Q&A text
+
+======================================================================
+  DATASET C — OPENENDED SPEECH CORPUS (Annotation CSVs)
+======================================================================
+  gemini2_train : (6109, 4)
+  gemini2_dev   : (2673, 4)
+  human_test    : (1000, 13)
+  meta_data     : (9782, 4)
+
+  Missing values (meta_data):
+wavname     0
+user_id     0
+question    1
+split       0
+
+  Split distribution:
+split
+train    6109
+dev      2673
+test     1000
+
+  Unique users  : 1003
+  Unique questions (approx): 1131
+
+  gemini2_train score ranges:
+    Accuracy: min=1 max=5 mean=3.14 std=0.50
+    Fluency: min=1 max=5 mean=2.73 std=0.52
+    Prosody: min=1 max=5 mean=2.58 std=0.52
+
+  human_test score ranges (averaged):
+    Accuracy: min=1.33 max=5.00 mean=3.28 std=0.62
+    Fluency: min=1.00 max=5.00 mean=2.98 std=0.76
+    Prosody: min=1.33 max=5.00 mean=3.49 std=0.62
+  [SAVED] C1_split_sizes.png
+  [SAVED] C2_gemini_train_scores.png
+  [SAVED] C3_gemini_dev_scores.png
+  [SAVED] C4_human_test_scores.png
+  [SAVED] C5_score_correlations.png
+  [SAVED] C6_inter_annotator_agreement.png
+  [SAVED] C7_top_questions.png
+
+  Overlapping records (human test & gemini labels): 0
+  [SKIP] No overlapping wavnames between human_test and gemini labels — C8 skipped
+
+  Key Findings:
+  - 9,782 unique speech recordings in metadata
+  - 1003 unique speakers
+  - 1 missing value in 'question' column of meta_data (negligible)
+  - Gemini AI scores peak around 3 (moderate) — slight central tendency bias
+  - Human annotators show moderate-to-high inter-annotator agreement (r > 0.5)
+  - Scores for Accuracy & Fluency are more correlated than Prosody
+  - wav.zip audio (6.71 GB) NOT downloaded — audio features unavailable for now
+  - LIMITATION: Without audio files, only metadata + label EDA is possible
+
+======================================================================
+  COMBINED EDA SUMMARY
+======================================================================
+
+DATASET A — Student Employability (Classification Task)
+  Records : 2,982 | Features: 8 numeric + 1 identifier | Target: CLASS (binary)
+  Quality : Perfect — 0 missing, 0 duplicates
+  Insight : Moderate class imbalance (58/42). COMMUNICATION SKILLS is most
+            discriminating. All features on 2-5 Likert scale — minimal preprocessing.
+  Next    : Drop 'Name of Student', encode target → binary. Apply Logistic
+            Regression, Random Forest, SVM, Gradient Boosting, KNN.
+
+DATASET B — AI Interview Questions (NLP / Reference Q&A)
+  Records : 5,817 (train: 4,653 / eval: 1,164) | 1 raw column
+  Quality : 0 missing, 0 duplicates. Parses cleanly.
+  Insight : Avg answer length ~60 words. Dominated by 'What' and 'How' questions.
+            Topics span software engineering, business, CS fundamentals.
+  Next    : Parse Q&A text; cluster questions by topic (TF-IDF + KMeans);
+            use answers as reference for candidate answer scoring (cosine similarity).
+
+DATASET C — OpenEnded Speech Corpus (Speech Quality Scoring)
+  Records : 9,782 recordings (CSV annotation labels only)
+  Quality : 1 missing value in metadata (negligible). No audio downloaded.
+  Insight : AI labels (Gemini) peak at score 3. Human test labels show
+            moderate inter-annotator agreement (r ≈ 0.55–0.75 across dimensions).
+  Next    : Audio download required for feature extraction. For now, train
+            regression/classification model on AI labels. Evaluate against
+            human gold standard (human_test.csv).
+
+VISUALIZATIONS SAVED: reports/figures/
+  A1_class_distribution.png
+  A2_feature_distributions.png
+  A3_feature_by_class.png
+  A4_correlation_heatmap.png
+  A5_boxplots_by_class.png
+  A6_mean_scores_by_class.png
+  B1_split_sizes.png
+  B2_qa_length_distributions.png
+  B3_top_words.png
+  B4_question_types.png
+  B5_answer_len_by_qtype.png
+  C1_split_sizes.png
+  C2_gemini_train_scores.png
+  C3_gemini_dev_scores.png
+  C4_human_test_scores.png
+  C5_score_correlations.png
+  C6_inter_annotator_agreement.png
+  C7_top_questions.png
+  C8_ai_vs_human_scores.png  (if overlap exists)

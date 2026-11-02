@@ -1,0 +1,17 @@
+INTERVIEW TEXT NLP PIPELINE REPORT
+==================================================
+
+1. Dataset: K-areem/AI-Interview-Questions
+   - Train records: 4653
+   - Eval records: 1164
+   - Genuine Human Quality Labels: NONE (Architectural note: These are reference Q&A pairs, not graded candidate submissions)
+
+2. TF-IDF Vocabulary Size: 10000 features
+3. Scoring Dimensions: TF-IDF Cosine Relevance, Question Alignment, Jaccard Keyword Overlap, Structural Coherence
+4. Demonstration Benchmark:
+   - Tier: High Quality (Thorough & Accurate)
+     Quality Score: 0.4228 (Relevance: 0.4625, Structure: 0.5)
+   - Tier: Moderate Quality (Partial understanding)
+     Quality Score: 0.0999 (Relevance: 0.0522, Structure: 0.4)
+   - Tier: Poor Quality (Irrelevant / Vague)
+     Quality Score: 0.045 (Relevance: 0.0, Structure: 0.3)

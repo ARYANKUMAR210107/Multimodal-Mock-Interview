@@ -1,0 +1,354 @@
+
+======================================================================
+  STEP 1 — LOAD RAW DATA
+======================================================================
+  Raw shape : (2982, 10)
+  Columns   : ['Name of Student', 'GENERAL APPEARANCE', 'MANNER OF SPEAKING', 'PHYSICAL CONDITION', 'MENTAL ALERTNESS', 'SELF-CONFIDENCE', 'ABILITY TO PRESENT IDEAS', 'COMMUNICATION SKILLS', 'Student Performance Rating', 'CLASS']
+
+======================================================================
+  STEP 2 — TARGET LEAKAGE INVESTIGATION
+======================================================================
+
+WHAT IS TARGET LEAKAGE?
+  Leakage happens when a feature contains information that is directly
+  derived from the target label — making the model appear very accurate
+  during training but FAIL in real-world use.
+
+  Example: If "Student Performance Rating" is just a re-labelling of
+  CLASS, training with it would artificially inflate accuracy.
+
+  Point-Biserial Correlation: each feature vs. binary target
+  Feature                                     r       p-value  Risk
+  -----------------------------------  --------  ------------  --------------------
+  GENERAL APPEARANCE                    +0.1164      1.80e-10  OK
+  MANNER OF SPEAKING                    +0.1979      1.04e-27  OK
+  PHYSICAL CONDITION                    +0.1645      1.57e-19  OK
+  MENTAL ALERTNESS                      +0.2028      4.82e-29  OK
+  SELF-CONFIDENCE                       +0.1415      8.13e-15  OK
+  ABILITY TO PRESENT IDEAS              +0.1174      1.25e-10  OK
+  COMMUNICATION SKILLS                  +0.1329      3.24e-13  OK
+  Student Performance Rating            -0.0008      9.64e-01  OK
+
+LEAKAGE FINDING:
+  Student Performance Rating has r = -0.0008 (essentially ZERO correlation
+  with the binary target). A Decision Tree using only SPR gets just 57.98%
+  accuracy — same as the majority-class baseline. 
+
+  CONCLUSION: SPR is NOT a leakage variable. Its distribution is almost
+  identical across Employable and LessEmployable classes (cross-tab showed
+  ~58% Employable at every SPR level). However, SPR is also nearly
+  USELESS as a predictor since it conveys no discriminating information.
+
+  DECISION: EXCLUDE Student Performance Rating from training features.
+  Reason: It adds no predictive value AND its role/origin is ambiguous
+  (could be an interviewer's global impression that mirrors CLASS labels
+  assigned simultaneously — collinear opinion, not independent measurement).
+
+EXCLUDED FEATURES (per project instructions + leakage analysis):
+  - Name of Student        (identifier, not a feature)
+  - GENERAL APPEARANCE     (excluded per instructions: appearance feature)
+  - PHYSICAL CONDITION     (excluded per instructions: physical feature)
+  - Student Performance Rating  (excluded: near-zero correlation, ambiguous origin)
+
+
+======================================================================
+  STEP 3 — FEATURE ENGINEERING
+======================================================================
+
+WHAT IS FEATURE ENGINEERING?
+  We choose which columns (features) to give the model.
+  We also transform them if needed (e.g., scaling to the same range).
+
+  Our features are Likert scale ratings (2–5). They are already on the
+  same scale, so no major transformation is needed. However, some models
+  (SVM, KNN, Logistic Regression) work better when features are
+  standardized to mean=0, std=1. We handle this inside each model's Pipeline.
+
+  Selected features (5):
+    - MANNER OF SPEAKING                   r=+0.1979 vs target
+    - MENTAL ALERTNESS                     r=+0.2028 vs target
+    - SELF-CONFIDENCE                      r=+0.1415 vs target
+    - ABILITY TO PRESENT IDEAS             r=+0.1174 vs target
+    - COMMUNICATION SKILLS                 r=+0.1329 vs target
+
+  X shape : (2982, 5)
+  y distribution:
+CLASS
+Employable        1729
+LessEmployable    1253
+
+ENGINEERED FEATURES:
+  We create 2 composite features to capture overall soft-skill strength:
+    1. soft_skill_mean   — average of all 5 selected features
+    2. soft_skill_min    — weakest skill (the bottleneck)
+  These may capture patterns that individual features miss.
+
+  Total features after engineering: 7
+  [SAVED] E1_feature_correlation_target.png
+
+======================================================================
+  STEP 4 — STRATIFIED TRAIN / VALIDATION / TEST SPLIT
+======================================================================
+
+WHY STRATIFIED SPLITS?
+  With a 58/42 class imbalance, a random split might accidentally put
+  too many "Employable" in the test set, skewing results.
+  Stratified split ensures each split has the SAME class proportions
+  as the full dataset.
+
+  We use a 3-way split:
+    Train      (60%) — used to FIT / LEARN the model
+    Validation (20%) — used to TUNE hyperparameters / compare models
+    Test       (20%) — held out until the FINAL evaluation only
+
+  The test set is NEVER touched during model selection.
+
+  Total dataset  :  2982 samples
+  Train          :  1788 samples  (60.0%)
+  Validation     :   597 samples  (20.0%)
+  Test           :   597 samples  (20.0%)
+
+  Train class split: Employable=58.0%  LessEmployable=42.0%
+  Val class split: Employable=58.0%  LessEmployable=42.0%
+  Test class split: Employable=58.0%  LessEmployable=42.0%
+  [SAVED] E2_train_val_test_split.png
+
+======================================================================
+  STEP 5 — MODEL DEFINITIONS WITH EXPLANATIONS
+======================================================================
+
+We train 6 different classification algorithms.
+Each is wrapped in a sklearn Pipeline that standardizes features first
+(for models that need it) and then applies the classifier.
+
+=== ALGORITHM EXPLANATIONS ===
+
+1. LOGISTIC REGRESSION
+   - Despite its name, this is a CLASSIFICATION algorithm.
+   - It fits a linear decision boundary between classes.
+   - It outputs a probability (0–1) for each class.
+   - Works well when features have a roughly linear relationship with the target.
+   - Simple, fast, and highly interpretable.
+
+2. DECISION TREE
+   - Learns a tree of if-then rules from the data.
+   - Example: "If COMMUNICATION SKILLS > 3 AND MENTAL ALERTNESS > 3 → Employable"
+   - Highly interpretable but can overfit (memorize training data).
+   - We limit max_depth to prevent overfitting.
+
+3. RANDOM FOREST
+   - Builds MANY decision trees (n_estimators=200) on random data subsets.
+   - Final prediction = majority vote of all trees.
+   - Much more robust than a single Decision Tree.
+   - Also provides feature importance rankings.
+
+4. SUPPORT VECTOR MACHINE (SVM)
+   - Finds the WIDEST possible boundary (margin) between the two classes.
+   - Works in a high-dimensional transformed feature space (kernel trick).
+   - The RBF kernel handles non-linear relationships.
+   - Effective on small-to-medium datasets with clear separation.
+
+5. GRADIENT BOOSTING
+   - Builds trees SEQUENTIALLY — each tree fixes the mistakes of the previous.
+   - One of the most powerful classical ML algorithms.
+   - Slower to train but usually very accurate.
+
+6. K-NEAREST NEIGHBORS (KNN)
+   - Makes predictions by looking at the k closest training examples.
+   - If 5 neighbors → 4 are "Employable" → prediction = "Employable".
+   - Very intuitive but sensitive to feature scale (needs standardization).
+   - No training phase — stores all training data in memory.
+
+
+======================================================================
+  STEP 6 — 5-FOLD STRATIFIED CROSS-VALIDATION (Train Set)
+======================================================================
+
+WHAT IS CROSS-VALIDATION?
+  Instead of training once, we train 5 times on different portions of
+  the training data. Each time, 1/5 of the training data is used as a
+  mini-validation set, and we record performance.
+
+  Why? Because a single train/val split might be "lucky" or "unlucky".
+  5-fold CV gives us a more reliable estimate of how the model actually
+  performs — with error bars (standard deviation across 5 runs).
+
+  We do this ONLY on the training set. The test set is still untouched.
+
+  Logistic Regression     Acc=0.5984±0.0232  F1=0.5972±0.0235  (2.5s)
+  Decision Tree           Acc=0.6421±0.0337  F1=0.6362±0.0310  (1.7s)
+  Random Forest           Acc=0.7148±0.0213  F1=0.7072±0.0213  (2.5s)
+  SVM                     Acc=0.7249±0.0236  F1=0.7134±0.0226  (1.8s)
+  Gradient Boosting       Acc=0.7634±0.0125  F1=0.7425±0.0161  (0.4s)
+  KNN                     Acc=0.7338±0.0179  F1=0.7182±0.0223  (0.1s)
+  [SAVED] E3_cv_results.png
+
+======================================================================
+  STEP 7 — TRAIN ON FULL TRAIN SET, EVALUATE ON VALIDATION SET
+======================================================================
+
+After cross-validation gives us confidence in which models work,
+we now TRAIN each model on the entire Training set and evaluate
+on the HELD-OUT VALIDATION set (which the model has never seen).
+
+This gives us a single, unbiased performance estimate per model.
+
+  Logistic Regression     Acc=0.5796  Prec=0.6568  Rec=0.5751  F1=0.6133  ROC-AUC=0.6001
+  Decision Tree           Acc=0.6432  Prec=0.7529  Rec=0.5723  F1=0.6502  ROC-AUC=0.7069
+  Random Forest           Acc=0.7052  Prec=0.7852  Rec=0.6763  F1=0.7267  ROC-AUC=0.8075
+  SVM                     Acc=0.7303  Prec=0.7591  Rec=0.7832  F1=0.7710  ROC-AUC=0.7700
+  Gradient Boosting       Acc=0.7638  Prec=0.7531  Rec=0.8815  F1=0.8123  ROC-AUC=0.8347
+  KNN                     Acc=0.6918  Prec=0.7355  Rec=0.7312  F1=0.7333  ROC-AUC=0.7898
+  [SAVED] E4_confusion_matrices_val.png
+  [SAVED] E5_model_comparison_val.png
+  [SAVED] E6_roc_curves_val.png
+
+======================================================================
+  STEP 8 — FEATURE IMPORTANCE (Random Forest)
+======================================================================
+
+WHAT IS FEATURE IMPORTANCE?
+  Random Forest measures how much each feature REDUCES prediction error
+  across all trees. Higher importance = more useful for classification.
+  This helps us understand WHICH soft skills matter most for employability.
+
+
+  Feature Importances (Random Forest):
+    soft_skill_mean                      0.3140  ███████████████████████████████
+    MANNER OF SPEAKING                   0.1714  █████████████████
+    MENTAL ALERTNESS                     0.1554  ███████████████
+    ABILITY TO PRESENT IDEAS             0.1069  ██████████
+    SELF-CONFIDENCE                      0.1049  ██████████
+    COMMUNICATION SKILLS                 0.0744  ███████
+    soft_skill_min                       0.0730  ███████
+  [SAVED] E7_feature_importance_rf.png
+
+======================================================================
+  STEP 9 — FINAL EVALUATION ON HELD-OUT TEST SET
+======================================================================
+
+IMPORTANT — WHY WE SAVE THE TEST SET FOR LAST:
+  The test set simulates students the model has NEVER encountered.
+  We only evaluate on it ONCE — after all model selection is done.
+  Evaluating on test set multiple times = overfitting to the test set.
+
+  We select the BEST model based on Validation F1-Score, then test it.
+
+
+  Best model (by Val Macro F1): Gradient Boosting
+  Val Macro F1 = 0.7470
+
+  Model                      Acc    Prec     Rec      F1   ROC-AUC
+  ----------------------  ------  ------  ------  ------  --------
+  Logistic Regression     0.5930  0.6604  0.6127  0.6357  0.6316
+  Decision Tree           0.6985  0.7139  0.8006  0.7548  0.7766
+  Random Forest           0.7420  0.7697  0.7919  0.7806  0.8132
+  SVM                     0.7588  0.7440  0.8902  0.8105  0.7926
+  Gradient Boosting       0.7688  0.7419  0.9220  0.8222  0.8248 <-- BEST
+  KNN                     0.7119  0.7574  0.7399  0.7485  0.7849
+  [SAVED] E8_confusion_matrices_test.png
+  [SAVED] E9_model_comparison_table.png
+  [SAVED] E10_roc_curves_test.png
+
+======================================================================
+  STEP 10 — DECISION TREE VISUALIZATION
+======================================================================
+
+Decision Trees are the most interpretable model. We can actually
+DRAW the tree and see exactly which rules it learned.
+We re-train a shallow (max_depth=4) tree for clarity.
+
+  [SAVED] E11_decision_tree_visualization.png
+
+======================================================================
+  STEP 11 — SAVE TRAINED MODELS
+======================================================================
+
+We save each trained model as a .joblib file.
+Joblib is efficient for saving scikit-learn models because it handles
+large numpy arrays better than Python's built-in pickle.
+
+  Saved: logistic_regression_employability.joblib  (2.0 KB)
+  Saved: decision_tree_employability.joblib  (5.3 KB)
+  Saved: random_forest_employability.joblib  (1077.1 KB)
+  Saved: svm_employability.joblib  (125.2 KB)
+  Saved: gradient_boosting_employability.joblib  (386.6 KB)
+  Saved: knn_employability.joblib  (318.5 KB)
+
+  Metadata saved: C:\Users\Asus\OneDrive\Desktop\intelligent_supervised\Intelligent_Mock_Interview\models\employability_model_meta.json
+
+======================================================================
+  STEP 12 — FINAL SUMMARY
+======================================================================
+
+DATASET A — EMPLOYABILITY CLASSIFICATION: FINAL RESULTS
+========================================================
+
+Dataset:
+  Records : 2,982 | Features used: 7
+  Splits  : Train 60% / Val 20% / Test 20% (stratified)
+  Target  : CLASS (binary: Employable=1, LessEmployable=0)
+
+Feature Set (after exclusions):
+    - MANNER OF SPEAKING
+  - MENTAL ALERTNESS
+  - SELF-CONFIDENCE
+  - ABILITY TO PRESENT IDEAS
+  - COMMUNICATION SKILLS
+  - soft_skill_mean
+  - soft_skill_min
+
+Excluded Features:
+  - Name of Student       (identifier)
+  - GENERAL APPEARANCE    (per instructions)
+  - PHYSICAL CONDITION    (per instructions)
+  - Student Performance Rating (near-zero correlation r=-0.0008 with target)
+
+Leakage Investigation:
+  Student Performance Rating was investigated for leakage.
+  Cross-tab showed consistent ~58%/42% Employable/LessEmployable split
+  at ALL SPR levels (3, 4, 5). A Decision Tree on SPR alone achieves
+  only 57.98% — the same as predicting the majority class blindly.
+  CONCLUSION: SPR is NOT a leakage variable, but it IS useless as a
+  predictor. Excluded on grounds of low predictive value.
+
+Cross-Validation Results (5-fold, Train Set):
+
+  Gradient Boosting       CV_Acc=0.7634  CV_F1=0.7425
+  KNN                     CV_Acc=0.7338  CV_F1=0.7182
+  SVM                     CV_Acc=0.7249  CV_F1=0.7134
+  Random Forest           CV_Acc=0.7148  CV_F1=0.7072
+  Decision Tree           CV_Acc=0.6421  CV_F1=0.6362
+  Logistic Regression     CV_Acc=0.5984  CV_F1=0.5972
+
+Validation Set Results:
+
+  Gradient Boosting       Acc=0.7638  F1=0.8123  AUC=0.8347
+  SVM                     Acc=0.7303  F1=0.7710  AUC=0.7700
+  Random Forest           Acc=0.7052  F1=0.7267  AUC=0.8075
+  KNN                     Acc=0.6918  F1=0.7333  AUC=0.7898
+  Decision Tree           Acc=0.6432  F1=0.6502  AUC=0.7069
+  Logistic Regression     Acc=0.5796  F1=0.6133  AUC=0.6001
+
+TEST SET RESULTS (Final — model never saw this data):
+
+  Gradient Boosting       Acc=0.7688  F1=0.8222  AUC=0.8248
+  SVM                     Acc=0.7588  F1=0.8105  AUC=0.7926
+  Random Forest           Acc=0.7420  F1=0.7806  AUC=0.8132
+  KNN                     Acc=0.7119  F1=0.7485  AUC=0.7849
+  Decision Tree           Acc=0.6985  F1=0.7548  AUC=0.7766
+  Logistic Regression     Acc=0.5930  F1=0.6357  AUC=0.6316
+
+Best Model: Gradient Boosting
+
+Limitations:
+  1. All features are subjective interviewer ratings — no objective measures.
+  2. No score of 1 exists in the dataset — rating scale may be compressed.
+  3. The 5 soft-skill features have low-to-moderate correlations with the
+     target (r=0.13 to 0.20) — inherent limit on classification accuracy.
+  4. Without higher-quality discriminating features, ~70-78% accuracy is
+     a realistic ceiling for this dataset.
+  5. Results should not be extrapolated beyond college interview settings.
+
+Models saved to: models/
+Figures saved to: reports/figures/  (E1 through E11)
