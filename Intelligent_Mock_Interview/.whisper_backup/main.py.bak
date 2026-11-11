@@ -1,0 +1,1040 @@
+"""
+=============================================================================
+FastAPI Backend Server
+Intelligent Multimodal Mock Interview Assessment System
+=============================================================================
+"""
+
+import os, sys, tempfile, logging, math, re, json, time, uuid, hashlib
+import numbers
+from contextvars import ContextVar
+from datetime import datetime, timezone
+import pandas as pd
+import numpy as np
+import joblib
+import httpx
+
+from fastapi import FastAPI, UploadFile, File, Form, HTTPException
+from fastapi.responses import FileResponse
+from fastapi.middleware.cors import CORSMiddleware
+from pydantic import BaseModel, ConfigDict, Field
+from typing import Any, Dict, List, Optional
+from dotenv import load_dotenv
+from google import genai
+from google.genai import types
+from google.genai.errors import APIError, ClientError, ServerError
+from starlette.concurrency import run_in_threadpool
+
+# Add project root and src to path
+BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+ROOT_DIR = os.path.dirname(BASE_DIR)
+
+def _get_gemini_api_key() -> str:
+    # Check existing environment
+    key = os.getenv("GEMINI_API_KEY", "").strip() or os.getenv("GOOGLE_API_KEY", "").strip()
+    if key:
+        os.environ["GEMINI_API_KEY"] = key
+        return key
+
+    # Check absolute paths to root .env and project .env
+    env_paths = [
+        os.path.join(ROOT_DIR, ".env"),
+        os.path.join(BASE_DIR, ".env"),
+        os.path.join(os.path.abspath("."), ".env"),
+    ]
+    for p in env_paths:
+        if os.path.exists(p):
+            # Honor an explicitly configured process environment; only fill values
+            # that are absent from it using the project-root .env file.
+            load_dotenv(p, override=False)
+            key = os.getenv("GEMINI_API_KEY", "").strip() or os.getenv("GOOGLE_API_KEY", "").strip()
+            if key:
+                os.environ["GEMINI_API_KEY"] = key
+                return key
+    return ""
+
+_get_gemini_api_key()
+sys.path.append(BASE_DIR)
+sys.path.append(os.path.join(BASE_DIR, "src"))
+
+from src.text_pipeline import (
+    InterviewTextAssessor,
+    calculate_text_assessment_score,
+    parse_instruction_parquet,
+    clean_text,
+)
+from src.audio_feature_extractor import CandidateAudioAnalyzer
+from src.database import initialize_database
+from backend.management_api import persist_assessment, router as management_router
+
+# Initialize FastAPI application
+app = FastAPI(
+    title="Intelligent Multimodal Mock Interview Assessment API",
+    description="Backend ML & NLP Inference Service for Employability Prediction, Text Assessment, and Audio Analysis.",
+    version="1.0.0"
+)
+app.include_router(management_router)
+initialize_database()
+
+logger = logging.getLogger(__name__)
+REQUEST_ID = ContextVar("interviewai_request_id", default="-")
+MAX_AUDIO_BYTES = 25 * 1024 * 1024
+GEMINI_REQUEST_TIMEOUT_SECONDS = 60.0
+AUDIO_FORMATS = {
+    ".wav": ("audio/wav", "audio/x-wav", "audio/wave"),
+    ".mp3": ("audio/mpeg", "audio/mp3", "audio/x-mp3"),
+    ".m4a": ("audio/mp4", "audio/x-m4a", "audio/m4a", "audio/aac"),
+    ".webm": ("audio/webm", "video/webm"),
+}
+
+
+def _log_event(event: str, level: int = logging.INFO, **fields) -> None:
+    """Write a structured, content-safe event for one API operation."""
+    entry = {
+        "event": event,
+        "request_id": REQUEST_ID.get(),
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+        **fields,
+    }
+    logger.log(level, json.dumps(entry, separators=(",", ":"), default=str))
+
+
+_log_event("gemini_config_check", configured=bool(os.getenv("GEMINI_API_KEY", "")),
+           model=os.getenv("GEMINI_TRANSCRIPTION_MODEL", "gemini-3.5-flash-lite"))
+
+
+@app.middleware("http")
+async def request_logging_middleware(request, call_next):
+    supplied_id = request.headers.get("X-Request-ID", "")
+    request_id = supplied_id if re.fullmatch(r"[A-Za-z0-9._-]{1,80}", supplied_id) else uuid.uuid4().hex
+    token = REQUEST_ID.set(request_id)
+    started = time.perf_counter()
+    _log_event("request_started", method=request.method, path=request.url.path)
+    try:
+        response = await call_next(request)
+        response.headers["X-Request-ID"] = request_id
+        elapsed_ms = round((time.perf_counter() - started) * 1000, 1)
+        level = logging.ERROR if response.status_code >= 500 else logging.WARNING if response.status_code >= 400 else logging.INFO
+        _log_event("request_completed", level=level, method=request.method, path=request.url.path,
+                   status_code=response.status_code, elapsed_ms=elapsed_ms)
+        return response
+    except Exception as exc:
+        _log_event("request_failed", level=logging.ERROR, method=request.method, path=request.url.path,
+                   error_type=type(exc).__name__, elapsed_ms=round((time.perf_counter() - started) * 1000, 1))
+        raise
+    finally:
+        REQUEST_ID.reset(token)
+
+
+def _validate_audio_bytes(filename: str, content_type: str, data: bytes) -> str:
+    ext = os.path.splitext(filename or "")[1].lower()
+    if not data:
+        raise HTTPException(status_code=400, detail="The uploaded audio file is empty.")
+    if len(data) > MAX_AUDIO_BYTES:
+        raise HTTPException(status_code=413, detail="Audio must be 25 MB or smaller.")
+
+    # Check magic container signatures
+    is_wav = data.startswith(b"RIFF") and len(data) >= 12 and data[8:12] == b"WAVE"
+    is_mp3 = data.startswith(b"ID3") or (len(data) > 1 and data[0] == 0xFF and data[1] & 0xE0 == 0xE0)
+    is_m4a = len(data) > 12 and data[4:8] == b"ftyp"
+    is_webm = data.startswith(b"\x1a\x45\xdf\xa3")
+
+    # If browser recorded WebM but labeled as .wav, auto-align:
+    if is_webm and ext in (".wav", ""):
+        ext = ".webm"
+    elif is_wav and ext in (".webm", ""):
+        ext = ".wav"
+
+    if ext not in AUDIO_FORMATS:
+        raise HTTPException(status_code=415, detail="Supported audio formats are WAV, MP3, M4A, and WebM.")
+
+    valid_signature = {
+        ".wav": is_wav,
+        ".mp3": is_mp3,
+        ".m4a": is_m4a,
+        ".webm": is_webm,
+    }.get(ext, False)
+
+    if not valid_signature:
+        raise HTTPException(status_code=415, detail="The file content does not match its audio extension.")
+
+    mime = content_type.split(";", 1)[0].strip().lower()
+    # Normalize browser mismatched mime types
+    if ext == ".webm" and mime in ("audio/wav", "application/octet-stream", "audio/webm"):
+        mime = "audio/webm"
+    elif ext == ".wav" and mime in ("audio/webm", "application/octet-stream", "audio/wav"):
+        mime = "audio/wav"
+
+    if mime and mime not in AUDIO_FORMATS[ext] and mime != "application/octet-stream":
+        raise HTTPException(status_code=415, detail="The audio content type does not match the file extension.")
+    return ext
+
+
+def _get_gemini_client() -> genai.Client:
+    key = _get_gemini_api_key()
+    if not key:
+        raise HTTPException(
+            status_code=503,
+            detail="Google Gemini transcription is not configured. Set GEMINI_API_KEY in the root .env file."
+        )
+    return genai.Client(
+        api_key=key,
+        http_options=types.HttpOptions(
+            timeout=int(GEMINI_REQUEST_TIMEOUT_SECONDS * 1000),
+            retry_options=types.HttpRetryOptions(
+                attempts=2,
+                initial_delay=0.5,
+                max_delay=1.0,
+                jitter=0.2,
+                http_status_codes=[408, 500, 502, 503, 504],
+            ),
+        ),
+    )
+
+
+def _filler_word_count(transcript: str) -> int:
+    import re
+    matches = re.findall(r"\b(?:um+|uh+|erm+|ah+|like|you know|i mean)\b", transcript.lower())
+    return len(matches)
+
+
+def _finite_or_none(value):
+    if value is None:
+        return None
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return None
+    return number if math.isfinite(number) else None
+
+
+def _valid_unit_score(value) -> Optional[float]:
+    """Accept only finite numeric scores in [0, 1]; never coerce bad values to zero."""
+    if isinstance(value, bool) or not isinstance(value, numbers.Real):
+        return None
+    number_value = float(value)
+    if not math.isfinite(number_value) or not 0.0 <= number_value <= 1.0:
+        return None
+    return number_value
+
+
+def _safe_remove_temp(path: Optional[str]) -> None:
+    if not path:
+        return
+    try:
+        os.remove(path)
+    except FileNotFoundError:
+        return
+    except OSError as exc:
+        _log_event("temporary_file_cleanup_failed", level=logging.WARNING,
+                   error_type=type(exc).__name__)
+
+
+def _analyze_audio_bytes(filename: str, data: bytes, transcript: str, response_id: Optional[str] = None) -> dict:
+    ext = os.path.splitext(filename)[1].lower()
+    tmp_path = None
+    try:
+        with tempfile.NamedTemporaryFile(delete=False, suffix=ext) as tmp:
+            tmp.write(data)
+            tmp_path = tmp.name
+        _log_event("librosa_processing_started", file_format=ext, audio_bytes=len(data), response_id=response_id)
+        metrics = audio_analyzer.analyze_audio_file(tmp_path) or {}
+        if not isinstance(metrics, dict):
+            raise ValueError("Audio analyzer returned an invalid measurement payload.")
+        duration = _finite_or_none(metrics.get("duration_sec"))
+        if duration is None:
+            waveform, sample_rate = audio_analyzer.load_audio(tmp_path)
+            duration = len(waveform) / sample_rate if sample_rate else None
+            metrics["duration_sec"] = duration
+        if duration is None or duration < 0.25:
+            raise HTTPException(status_code=422, detail="Audio is too short to analyze; record at least 0.25 seconds.")
+        words = len(transcript.split())
+        has_transcript = bool(transcript.strip())
+        metrics["speaking_rate_wpm"] = round(words / (duration / 60.0), 1) if has_transcript else None
+        metrics["transcript_word_count"] = words if has_transcript else None
+        metrics["filler_word_count"] = _filler_word_count(transcript) if has_transcript else None
+        for key in ("mean_pitch_hz", "pitch_std_hz", "min_pitch_hz", "max_pitch_hz", "mean_energy_rms", "pause_ratio", "pause_duration_sec", "pause_count"):
+            metrics[key] = _finite_or_none(metrics.get(key))
+        mfcc = metrics.get("mfcc_mean")
+        if isinstance(mfcc, np.ndarray):
+            mfcc = mfcc.tolist()
+        elif isinstance(mfcc, tuple):
+            mfcc = list(mfcc)
+        elif not isinstance(mfcc, list):
+            mfcc = []
+        metrics["mfcc_mean"] = [_finite_or_none(v) for v in mfcc]
+        for key in (
+            "duration_sec", "speaking_duration_sec", "pause_ratio", "pause_duration_sec",
+            "pause_count", "speaking_rate_wpm", "transcript_word_count", "filler_word_count",
+            "mean_pitch_hz", "pitch_std_hz", "min_pitch_hz", "max_pitch_hz", "mean_energy_rms",
+        ):
+            metrics.setdefault(key, None)
+        # Pitch estimates are only meaningful for voiced recordings. Do not report
+        # fallback defaults from the extractor as measured values for silence.
+        if metrics["mean_energy_rms"] is not None and metrics["mean_energy_rms"] < 1e-5:
+            metrics["mean_pitch_hz"] = None
+            metrics["pitch_std_hz"] = None
+            metrics["min_pitch_hz"] = None
+            metrics["max_pitch_hz"] = None
+        # These measurements have no validated conversion to an audio quality
+        # score. Keep the report descriptive and avoid fabricating score fields.
+        metrics.pop("estimated_fluency_score", None)
+        metrics.pop("estimated_prosody_score", None)
+        _log_event("librosa_processing_completed", response_id=response_id,
+                   duration_sec=metrics.get("duration_sec"), mfcc_count=len(metrics.get("mfcc_mean", [])))
+        return metrics
+    except HTTPException:
+        raise
+    except Exception as exc:
+        _log_event("librosa_processing_failed", level=logging.WARNING, error_type=type(exc).__name__)
+        raise HTTPException(status_code=422, detail="Could not decode or analyze this audio. Check the file and try again.") from exc
+    finally:
+        _safe_remove_temp(tmp_path)
+
+
+def _transcribe_audio_with_gemini(
+    data: bytes, ext: str, audio_mime: str, client, model_name: str, response_id: str
+) -> str:
+    """Send audio to Gemini for transcription using the generate_content API.
+
+    The gemini-3.5-transcribe model does not return text output through the
+    standard APIs, so we use gemini-3.5-flash-lite with generate_content(),
+    which reliably produces verbatim transcripts.
+    """
+    tmp_path = None
+    uploaded_file_name = None
+    try:
+        with tempfile.NamedTemporaryFile(delete=False, suffix=ext) as tmp:
+            tmp.write(data)
+            tmp_path = tmp.name
+        try:
+            waveform, sample_rate = audio_analyzer.load_audio(tmp_path)
+        except Exception as decode_error:
+            _log_event("audio_validation_failed", level=logging.WARNING, file_format=ext,
+                       error_type=type(decode_error).__name__, response_id=response_id)
+            raise HTTPException(status_code=422, detail="Could not decode this audio recording. Try a valid supported audio file.") from decode_error
+        duration = len(waveform) / sample_rate if sample_rate else 0.0
+        if duration < 0.25:
+            raise HTTPException(status_code=422, detail="Audio is too short to transcribe; record at least 0.25 seconds.")
+
+        _log_event("audio_validation_completed", file_format=ext, audio_bytes=len(data),
+                   duration_sec=round(duration, 2), response_id=response_id)
+        _log_event("gemini_upload_started", file_format=ext, audio_bytes=len(data), response_id=response_id)
+        uploaded = client.files.upload(file=tmp_path)
+        uploaded_file_name = getattr(uploaded, "name", None)
+        _log_event("gemini_upload_completed", file_uri=getattr(uploaded, "uri", None), response_id=response_id)
+
+        transcript = ""
+        try:
+            _log_event("gemini_transcription_started", model=model_name, response_id=response_id)
+            response = client.models.generate_content(
+                model=model_name,
+                contents=[uploaded, "Transcribe this spoken interview response verbatim. Return only the transcription text."]
+            )
+            transcript = (getattr(response, "text", None) or "").strip()
+            _log_event("gemini_transcription_completed", model=model_name, transcript_characters=len(transcript),
+                       response_id=response_id)
+        except ClientError as gen_err:
+            # Re-raise ClientError so the endpoint handler can map to proper HTTP status (429/401/422)
+            raise
+        except Exception as gen_err:
+            _log_event("gemini_generate_content_failed", level=logging.WARNING,
+                       error_type=type(gen_err).__name__, error=str(gen_err), response_id=response_id)
+            raise
+
+        if not transcript:
+            raise HTTPException(status_code=422, detail="Gemini could not detect spoken words in this audio. Please speak clearly into the microphone.")
+        return transcript
+    finally:
+        if uploaded_file_name:
+            try:
+                client.files.delete(
+                    name=uploaded_file_name,
+                    config={"http_options": types.HttpOptions(
+                        timeout=5000,
+                        retry_options=types.HttpRetryOptions(attempts=1),
+                    )},
+                )
+            except Exception as cleanup_error:
+                _log_event("gemini_upload_cleanup_failed", level=logging.WARNING,
+                           error_type=type(cleanup_error).__name__, response_id=response_id)
+        _safe_remove_temp(tmp_path)
+
+# Enable CORS for local Streamlit frontend
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+# ── Load Pre-Trained Models on Startup ─────────────────────────────────────
+MODELS_DIR = os.path.join(BASE_DIR, "models")
+GB_MODEL_PATH = os.path.join(MODELS_DIR, "gradient_boosting_employability.joblib")
+TFIDF_MODEL_PATH = os.path.join(MODELS_DIR, "interview_tfidf_vectorizer.joblib")
+QUESTIONS_PARQUET = os.path.join(BASE_DIR, "dataset", "interview_questions", "eval-00000-of-00001.parquet")
+
+employability_model = None
+text_assessor = None
+audio_analyzer = None
+cached_questions = []
+
+try:
+    if os.path.exists(GB_MODEL_PATH):
+        employability_model = joblib.load(GB_MODEL_PATH)
+        print(f"[OK] Loaded Gradient Boosting Model from {GB_MODEL_PATH}")
+    else:
+        print(f"[WARNING] Model not found at {GB_MODEL_PATH}")
+
+    if os.path.exists(TFIDF_MODEL_PATH):
+        vectorizer = joblib.load(TFIDF_MODEL_PATH)
+        text_assessor = InterviewTextAssessor(vectorizer=vectorizer)
+        text_assessor.is_fitted = True
+        print(f"[OK] Loaded TF-IDF Vectorizer from {TFIDF_MODEL_PATH}")
+    else:
+        text_assessor = InterviewTextAssessor()
+        print(f"[WARNING] TF-IDF Vectorizer not found, initialized empty")
+
+    audio_analyzer = CandidateAudioAnalyzer(target_sr=16000)
+    print("[OK] Initialized CandidateAudioAnalyzer with Librosa")
+
+    if os.path.exists(QUESTIONS_PARQUET):
+        df_q = parse_instruction_parquet(QUESTIONS_PARQUET)
+        # Select top 50 diverse questions for mock interviews
+        cached_questions = df_q.head(50).to_dict(orient="records")
+        print(f"[OK] Cached {len(cached_questions)} reference interview questions")
+except Exception as e:
+    print(f"[ERROR] Startup loading error: {e}")
+
+_log_event(
+    "backend_startup_completed",
+    gradient_boosting_loaded=employability_model is not None,
+    text_assessor_loaded=text_assessor is not None and getattr(text_assessor, "is_fitted", False),
+    audio_analyzer_loaded=audio_analyzer is not None,
+    cached_question_count=len(cached_questions),
+)
+
+
+# ── Pydantic Request & Response Schemas ───────────────────────────────────
+class EmployabilityRequest(BaseModel):
+    manner_of_speaking: int = Field(..., ge=1, le=5, description="Speaking manner & clarity (1-5)")
+    mental_alertness: int = Field(..., ge=1, le=5, description="Comprehension & mental agility (1-5)")
+    self_confidence: int = Field(..., ge=1, le=5, description="Poise and confidence (1-5)")
+    ability_to_present_ideas: int = Field(..., ge=1, le=5, description="Structure & presentation (1-5)")
+    communication_skills: int = Field(..., ge=1, le=5, description="Overall communication (1-5)")
+
+class EmployabilityResponse(BaseModel):
+    prediction: str
+    probability_employable: float
+    probability_less_employable: float
+    confidence_score: float
+    soft_skill_mean: float
+    soft_skill_min: int
+    recommendations: List[str]
+
+class TextAssessmentRequest(BaseModel):
+    question: str
+    candidate_answer: str
+    reference_answer: Optional[str] = ""
+    session_id: Optional[str] = None
+    position: Optional[int] = None
+
+class TextAssessmentResponse(BaseModel):
+    relevance_score: float
+    question_alignment_score: float
+    keyword_overlap: float
+    structure_score: float
+    quality_score: float
+    performance_tier: str
+    feedback: List[str]
+
+
+class MultimodalReportResponse(BaseModel):
+    """Typed report contract; audio measurements never feed the text score."""
+    model_config = ConfigDict(extra="allow")
+
+    assessment_type: str
+    response_id: str
+    timestamp: str
+    interview_information: Dict[str, Any]
+    text_assessment: Dict[str, Any]
+    text_assessment_score: Optional[float]
+    text_assessment_score_status: str
+    text_assessment_score_formula: str
+    text_assessment_score_limitation: str
+    voice_assessment: Optional[Dict[str, Any]]
+    voice_analysis_status: str
+    overall_multimodal_assessment: Dict[str, str]
+
+
+# ── API Endpoints ──────────────────────────────────────────────────────────
+@app.get("/")
+def root():
+    api_key = _get_gemini_api_key()
+    key_configured = bool(api_key)
+    return {
+        "status": "online",
+        "system": "Intelligent Multimodal Mock Interview Assessment System",
+        "version": "1.0.0",
+        "transcription_provider": "gemini",
+        "transcription_configured": key_configured,
+        "transcription_status": "configured" if key_configured else "missing",
+        "transcription_model": os.getenv("GEMINI_TRANSCRIPTION_MODEL", "gemini-3.5-flash-lite"),
+        "endpoints": [
+            "/api/audio/transcribe",
+            "/health",
+            "/api/interview/multimodal-report",
+            "/api/v1/questions",
+            "/api/v1/predict/employability",
+            "/api/v1/assess/text",
+            "/api/v1/assess/audio",
+            "/api/v1/assess/multimodal"
+        ]
+    }
+
+
+@app.get("/health")
+def health():
+    configured = bool(_get_gemini_api_key())
+    return {
+        "status": "online",
+        "version": app.version,
+        "transcription_provider": "gemini",
+        "transcription_configured": configured,
+        "transcription_model": os.getenv("GEMINI_TRANSCRIPTION_MODEL", "gemini-3.5-flash-lite"),
+    }
+
+
+@app.post("/api/audio/transcribe")
+async def transcribe_audio(file: UploadFile = File(...), response_id: Optional[str] = Form(None)):
+    data = await file.read(MAX_AUDIO_BYTES + 1)
+    try:
+        ext = _validate_audio_bytes(file.filename or "", file.content_type or "", data)
+    finally:
+        await file.close()
+
+    import hashlib
+    if not response_id:
+        response_id = f"RESP-{hashlib.sha256(data).hexdigest()[:12].upper()}"
+    if not re.fullmatch(r"RESP-[A-F0-9]{10,32}", response_id):
+        raise HTTPException(status_code=400, detail="Invalid response identifier.")
+    _log_event("audio_upload_received", file_format=ext, audio_bytes=len(data), response_id=response_id)
+
+    mime_map = {
+        ".wav": "audio/wav",
+        ".mp3": "audio/mp3",
+        ".m4a": "audio/m4a",
+         ".webm": "audio/webm",
+        ".ogg": "audio/ogg",
+        ".flac": "audio/flac",
+    }
+    audio_mime = mime_map.get(ext, file.content_type or "audio/wav")
+    if ";" in audio_mime:
+        audio_mime = audio_mime.split(";")[0].strip()
+
+    client = _get_gemini_client()
+    model_name = os.getenv("GEMINI_TRANSCRIPTION_MODEL", "gemini-3.5-flash-lite")
+    if audio_analyzer is None:
+        raise HTTPException(status_code=503, detail="Audio validation is unavailable because Librosa did not load.")
+
+    _log_event("audio_validation_started", file_format=ext, audio_bytes=len(data), response_id=response_id)
+    try:
+        transcript = await run_in_threadpool(
+            _transcribe_audio_with_gemini,
+            data,
+            ext,
+            audio_mime,
+            client,
+            model_name,
+            response_id,
+        )
+        _log_event("transcription_response_ready", model=model_name, transcript_characters=len(transcript),
+                   response_id=response_id)
+        return {"transcript": transcript, "model": model_name, "provider": "gemini", "response_id": response_id}
+    except HTTPException:
+        raise
+    except ClientError as exc:
+        err_msg = str(exc)
+        _log_event("gemini_client_error", level=logging.WARNING,
+                   error_type=type(exc).__name__, code=exc.code,
+                   error_prefix=err_msg[:120], response_id=response_id)
+        if exc.code == 429 or "quota" in err_msg.lower() or "resource_exhausted" in err_msg.lower():
+            raise HTTPException(
+                status_code=429,
+                detail="Gemini API rate limit or quota exceeded. Please check your Gemini API plan and quota at https://aistudio.google.com/."
+            )
+        # Auth errors take precedence: a 400 with "API_KEY_INVALID" is still an auth failure
+        if exc.code in (401, 403) or "api_key" in err_msg.lower() or "key not valid" in err_msg.lower() or "permission" in err_msg.lower():
+            raise HTTPException(
+                status_code=401,
+                detail="Invalid Gemini API key or permission denied. Please verify GEMINI_API_KEY in .env."
+            )
+        if exc.code == 404 or "model" in err_msg.lower() and "not found" in err_msg.lower():
+            raise HTTPException(
+                status_code=404,
+                detail="Gemini model or endpoint not found. Verify GEMINI_TRANSCRIPTION_MODEL in .env."
+            )
+        if exc.code == 400 or "invalid request" in err_msg.lower() or "bad request" in err_msg.lower():
+            raise HTTPException(
+                status_code=400,
+                detail="Invalid request to Gemini API. Check the audio format and retry."
+            )
+        raise HTTPException(
+            status_code=422,
+            detail="Gemini could not process this audio recording. Check its format and try again."
+        )
+    except ServerError as exc:
+        _log_event("gemini_server_error", level=logging.ERROR, error_type=type(exc).__name__)
+        raise HTTPException(
+            status_code=502,
+            detail="The Gemini transcription service encountered an upstream server error. Please try again."
+        )
+    except httpx.TimeoutException as exc:
+        _log_event("gemini_timeout", level=logging.WARNING, error_type=type(exc).__name__)
+        raise HTTPException(status_code=504, detail="Gemini transcription timed out. Please try again.") from exc
+    except httpx.RequestError as exc:
+        _log_event("gemini_network_error", level=logging.WARNING, error_type=type(exc).__name__)
+        raise HTTPException(status_code=502, detail="Could not reach Gemini. Check the network and retry.") from exc
+    except APIError as exc:
+        err_msg = str(exc)
+        _log_event("gemini_api_error", level=logging.WARNING, error_type=type(exc).__name__,
+                   code=getattr(exc, "code", None))
+        if getattr(exc, "code", 0) == 429 or "quota" in err_msg.lower():
+            raise HTTPException(
+                status_code=429,
+                detail="Gemini API rate limit or quota exceeded. Please check your Gemini API plan at https://aistudio.google.com/."
+            )
+        raise HTTPException(
+            status_code=502,
+            detail="Gemini API request failed. Please retry shortly."
+        )
+    except Exception as exc:
+        err_msg = str(exc)
+        _log_event("gemini_unexpected_error", level=logging.ERROR, error_type=type(exc).__name__)
+        if "quota" in err_msg.lower() or "rate" in err_msg.lower() or "429" in err_msg:
+            raise HTTPException(
+                status_code=429,
+                detail="Gemini API rate limit or quota exceeded. Please check your quota at https://aistudio.google.com/."
+            )
+        raise HTTPException(
+            status_code=502,
+            detail="Transcription failed due to an unexpected service error. Please retry."
+        ) from exc
+
+
+@app.post("/api/interview/multimodal-report", response_model=MultimodalReportResponse)
+async def multimodal_report(
+    question: str = Form(...),
+    reference_answer: str = Form(""),
+    corrected_transcript: str = Form(...),
+    response_id: Optional[str] = Form(None),
+    session_id: Optional[str] = Form(None),
+    position: Optional[int] = Form(None),
+    original_transcript: Optional[str] = Form(None),
+    file: UploadFile = File(...),
+):
+    if text_assessor is None or not getattr(text_assessor, "is_fitted", False):
+        raise HTTPException(status_code=503, detail="Text assessment engine is not loaded.")
+    if audio_analyzer is None:
+        raise HTTPException(status_code=503, detail="Audio analysis engine is not loaded.")
+    question = question.strip()
+    transcript = corrected_transcript.strip()
+    reference = reference_answer.strip()
+    if not question or not transcript:
+        raise HTTPException(status_code=400, detail="Question and corrected transcript are required.")
+    if len(transcript.split()) < 3:
+        raise HTTPException(status_code=400, detail="Transcript is too short to assess (minimum 3 words).")
+    data = await file.read(MAX_AUDIO_BYTES + 1)
+    try:
+        ext = _validate_audio_bytes(file.filename or "", file.content_type or "", data)
+    finally:
+        await file.close()
+
+    audio_digest = hashlib.sha256(data).hexdigest()[:12]
+    durable_audio_name = None
+    if session_id and position:
+        try:
+            recordings_dir = os.path.join(BASE_DIR, "data", "audio_recordings")
+            os.makedirs(recordings_dir, exist_ok=True)
+            durable_audio_name = f"{session_id}_q{position}_{audio_digest}{ext}"
+            durable_path = os.path.join(recordings_dir, durable_audio_name)
+            with open(durable_path, "wb") as f_out:
+                f_out.write(data)
+        except Exception as e:
+            logger.warning(f"Could not persist candidate audio recording: {e}")
+    if not response_id:
+        response_id = f"RESP-{hashlib.sha256((question + transcript + audio_digest).encode()).hexdigest()[:12].upper()}"
+    if not re.fullmatch(r"RESP-[A-F0-9]{10,32}", response_id):
+        raise HTTPException(status_code=400, detail="Invalid response identifier.")
+    _log_event("audio_upload_received", file_format=ext, audio_bytes=len(data), response_id=response_id)
+    audio_metrics = await run_in_threadpool(
+        _analyze_audio_bytes, file.filename or "recording.wav", data, transcript, response_id
+    )
+    scores = await run_in_threadpool(text_assessor.assess_answer, question, transcript, reference or question)
+
+    strengths = list(scores.get("strengths", []))
+    improvements = list(scores.get("improvements", []))
+    pause_ratio = audio_metrics.get("pause_ratio")
+    if pause_ratio is not None:
+        if pause_ratio > 0.35:
+            improvements.append("The recording contains a high measured pause ratio; practice connecting key points with shorter pauses.")
+        elif pause_ratio < 0.08:
+            improvements.append("The recording contains very little silence; consider brief pauses between major points.")
+        else:
+            strengths.append("The measured pause ratio falls within the configured conversational range.")
+    filler_count = audio_metrics.get("filler_word_count")
+    if isinstance(filler_count, numbers.Real) and filler_count > 0:
+        improvements.append(f"The corrected transcript contains {filler_count} detected filler-word occurrence(s).")
+    elif filler_count == 0 and transcript:
+        strengths.append("No configured filler words were found in the corrected transcript.")
+
+    component_fields = (
+        "relevance_score",
+        "question_alignment_score",
+        "keyword_overlap",
+        "structure_score",
+    )
+    reported_scores = dict(scores)
+    for field in component_fields:
+        reported_scores[field] = _valid_unit_score(scores.get(field))
+    try:
+        text_quality = calculate_text_assessment_score(reported_scores)
+    except (TypeError, ValueError):
+        text_quality = None
+    reported_scores["quality_score"] = text_quality
+    reported_scores["reference_similarity"] = reported_scores["relevance_score"]
+    reported_scores["strengths"] = strengths
+    reported_scores["improvements"] = improvements
+
+    measured_fields = (
+        "duration_sec", "speaking_duration_sec", "pause_ratio", "pause_duration_sec",
+        "pause_count", "mean_pitch_hz", "pitch_std_hz", "min_pitch_hz", "max_pitch_hz",
+        "mean_energy_rms",
+    )
+    available_audio_fields = [
+        field for field in measured_fields
+        if _finite_or_none(audio_metrics.get(field)) is not None
+    ]
+    mfcc_values = audio_metrics.get("mfcc_mean")
+    mfcc_values = mfcc_values if isinstance(mfcc_values, (list, tuple)) else []
+    if any(_finite_or_none(value) is not None for value in mfcc_values):
+        available_audio_fields.append("mfcc_mean")
+    voice_available = any(field != "duration_sec" for field in available_audio_fields)
+    voice_analysis_status = "Available" if voice_available else "Not available"
+    if text_quality is not None and voice_available:
+        overall_status = "Available"
+        overall_explanation = (
+            "The text assessment score and separate voice measurements are both available. "
+            "They are reported independently; no combined multimodal numeric score is calculated."
+        )
+    elif text_quality is None and voice_available:
+        overall_status = "Not available"
+        overall_explanation = "Voice measurements are available, but a valid text assessment score could not be calculated."
+    elif text_quality is not None:
+        overall_status = "Not available"
+        overall_explanation = "The text assessment score is available, but no usable audio feature measurements were returned."
+    else:
+        overall_status = "Not available"
+        overall_explanation = "Neither a valid text assessment score nor usable audio measurements are available."
+
+    score_formula = (
+        "0.50 * TF-IDF reference cosine similarity + 0.20 * TF-IDF question cosine similarity "
+        "+ 0.15 * Jaccard keyword overlap + 0.15 * answer structure heuristic"
+    )
+    text_score_status = "Available" if text_quality is not None else "Not available"
+    report = {
+        "assessment_type": "Independent Text and Audio Assessment",
+        "response_id": response_id,
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "interview_information": {
+            "question": question,
+            "reference_answer": reference,
+            "corrected_transcript": transcript,
+            "original_transcript": original_transcript.strip() if original_transcript else None,
+            "response_id": response_id,
+        },
+        "text_assessment": reported_scores,
+        "text_assessment_score": text_quality,
+        "text_assessment_score_status": text_score_status,
+        "text_assessment_score_formula": score_formula,
+        "text_assessment_score_limitation": (
+            "A heuristic reference-based practice score, not calibrated against human ratings and not a hiring decision."
+        ),
+        "voice_analysis_status": voice_analysis_status,
+        "voice_analysis_available_fields": available_audio_fields,
+        "voice_assessment": audio_metrics,
+        "overall_multimodal_assessment": {
+            "status": overall_status,
+            "explanation": overall_explanation,
+        },
+        "feedback": {"strengths": strengths, "areas_for_improvement": improvements},
+        "multimodal_summary": {
+            "content_summary": f"Text assessment score: {text_quality:.1%}." if text_quality is not None else "Text assessment score is unavailable.",
+            "delivery_summary": "Audio feature measurements are reported separately in voice_assessment.",
+            "composite_verdict": overall_explanation,
+        }
+    }
+    _log_event("assessment_report_generated", response_id=response_id,
+               duration_sec=audio_metrics.get("duration_sec"), text_quality=text_quality)
+    if durable_audio_name:
+        report["audio_file_name"] = durable_audio_name
+    if session_id:
+        if position is None or position < 1:
+            raise HTTPException(status_code=422, detail="A valid session question position is required with session_id.")
+        persist_assessment(session_id, position, "voice", report)
+    return report
+
+@app.get("/api/audio/recordings/{filename}")
+def get_audio_recording(filename: str):
+    recordings_dir = os.path.join(BASE_DIR, "data", "audio_recordings")
+    safe_filename = os.path.basename(filename)
+    audio_path = os.path.join(recordings_dir, safe_filename)
+    if not os.path.exists(audio_path):
+        raise HTTPException(status_code=404, detail="Audio recording not found.")
+    return FileResponse(audio_path, media_type="audio/wav")
+
+@app.get("/api/v1/questions")
+def get_interview_questions(limit: int = 15):
+    """Returns curated mock interview questions with expert reference answers."""
+    if not cached_questions:
+        return {"questions": []}
+    return {"questions": cached_questions[:limit]}
+
+
+@app.post("/api/v1/predict/employability", response_model=EmployabilityResponse)
+def predict_employability(req: EmployabilityRequest):
+    """
+    Predicts student employability based on 5 non-appearance soft-skill features.
+    Computes engineered soft_skill_mean and soft_skill_min before inference.
+    """
+    if employability_model is None:
+        raise HTTPException(status_code=503, detail="Employability model pipeline is not loaded.")
+    
+    # Feature engineering matching the trained model pipeline
+    features_dict = {
+        "MANNER OF SPEAKING": req.manner_of_speaking,
+        "MENTAL ALERTNESS": req.mental_alertness,
+        "SELF-CONFIDENCE": req.self_confidence,
+        "ABILITY TO PRESENT IDEAS": req.ability_to_present_ideas,
+        "COMMUNICATION SKILLS": req.communication_skills,
+    }
+    raw_vals = list(features_dict.values())
+    features_dict["soft_skill_mean"] = float(np.mean(raw_vals))
+    features_dict["soft_skill_min"] = int(np.min(raw_vals))
+    
+    input_df = pd.DataFrame([features_dict])
+    
+    # Predict
+    pred = employability_model.predict(input_df)[0]
+    proba = employability_model.predict_proba(input_df)[0]
+    
+    emp_idx = list(employability_model.classes_).index("Employable")
+    less_idx = 1 - emp_idx
+    
+    p_emp = float(proba[emp_idx])
+    p_less = float(proba[less_idx])
+    
+    # Generate tailored actionable feedback
+    feedback = []
+    if req.communication_skills < 3:
+        feedback.append("Focus on verbal conciseness and vocabulary precision in technical descriptions.")
+    if req.manner_of_speaking < 3:
+        feedback.append("Practice steady pacing and clear vocal articulation to enhance delivery.")
+    if req.self_confidence < 3:
+        feedback.append("Engage in timed mock interviews to reduce hesitation under pressure.")
+    if req.ability_to_present_ideas < 3:
+        feedback.append("Utilize the STAR method (Situation, Task, Action, Result) to organize answers.")
+    if req.mental_alertness < 3:
+        feedback.append("Take 3 seconds to structure your thoughts before answering complex questions.")
+    if not feedback:
+        feedback.append("Excellent soft-skill profile! Continue reinforcing technical domain knowledge.")
+
+    return EmployabilityResponse(
+        prediction=pred,
+        probability_employable=round(p_emp, 4),
+        probability_less_employable=round(p_less, 4),
+        confidence_score=round(max(p_emp, p_less) * 100, 1),
+        soft_skill_mean=round(features_dict["soft_skill_mean"], 2),
+        soft_skill_min=features_dict["soft_skill_min"],
+        recommendations=feedback
+    )
+
+
+@app.post("/api/v1/assess/text", response_model=TextAssessmentResponse)
+def assess_interview_text(req: TextAssessmentRequest):
+    """
+    Evaluates candidate typed or transcribed answer against question and reference answer.
+    """
+    if text_assessor is None:
+        raise HTTPException(status_code=503, detail="Text assessment engine not loaded.")
+    
+    q = req.question.strip()
+    ans = req.candidate_answer.strip()
+    ref = req.reference_answer.strip() if req.reference_answer else q
+    
+    if not q:
+        raise HTTPException(status_code=400, detail="Question cannot be empty.")
+    if len(ans.split()) < 3:
+        raise HTTPException(status_code=400, detail="Answer is too short to evaluate (minimum 3 words).")
+        
+    scores = text_assessor.assess_answer(q, ans, ref)
+    q_score = scores["quality_score"]
+    
+    if q_score >= 0.35:
+        tier = "Proficient / Strong Answer"
+    elif q_score >= 0.15:
+        tier = "Intermediate / Partially Correct"
+    else:
+        tier = "Developing / Insufficient Coverage"
+        
+    feedback = []
+    if scores["relevance_score"] < 0.20:
+        feedback.append("Content relevance is low compared to the reference standard; ensure you address specific technical keywords.")
+    else:
+        feedback.append("Good semantic alignment with the expected technical concepts.")
+        
+    if scores["structure_score"] < 0.40:
+        feedback.append("Response could be improved by using logical transitions (e.g. 'for example', 'specifically', 'therefore').")
+    else:
+        feedback.append("Well-structured sentence organization and adequate response length.")
+        
+    response = TextAssessmentResponse(
+        relevance_score=scores["relevance_score"],
+        question_alignment_score=scores["question_alignment_score"],
+        keyword_overlap=scores["keyword_overlap"],
+        structure_score=scores["structure_score"],
+        quality_score=q_score,
+        performance_tier=tier,
+        feedback=feedback
+    )
+    if req.session_id:
+        if req.position is None or req.position < 1:
+            raise HTTPException(status_code=422, detail="A valid session question position is required with session_id.")
+        persist_assessment(req.session_id, req.position, "text", {
+            "interview_information": {"question": q, "candidate_answer": ans},
+            "text_assessment": {**scores, "quality_score": q_score,
+                                "strengths": scores.get("strengths", []),
+                                "improvements": scores.get("improvements", [])},
+        })
+    return response
+
+
+@app.post("/api/v1/assess/audio")
+async def assess_interview_audio(file: UploadFile = File(...)):
+    """
+    Accepts supported audio and returns descriptive acoustic measurements.
+    """
+    if audio_analyzer is None:
+        raise HTTPException(status_code=503, detail="Audio analyzer not loaded.")
+
+    data = await file.read(MAX_AUDIO_BYTES + 1)
+    try:
+        ext = _validate_audio_bytes(file.filename or "", file.content_type or "", data)
+    finally:
+        await file.close()
+
+    _log_event("audio_upload_received", file_format=ext, audio_bytes=len(data))
+    metrics = await run_in_threadpool(_analyze_audio_bytes, file.filename or "recording.wav", data, "")
+    # Generate speech feedback
+    audio_feedback = []
+    if metrics.get("pause_ratio") is None:
+        audio_feedback.append("Pause ratio was unavailable for this recording.")
+    elif metrics["pause_ratio"] > 0.35:
+        audio_feedback.append("High silence ratio detected (>35%); try to reduce long hesitations between sentences.")
+    elif metrics["pause_ratio"] < 0.08:
+        audio_feedback.append("Very low pause ratio (<8%); remember to breathe and pause between major thoughts.")
+    else:
+        audio_feedback.append("Healthy speech rhythm and natural pacing.")
+        
+    if metrics.get("pitch_std_hz") is not None and metrics["pitch_std_hz"] < 10.0:
+        audio_feedback.append("Low pitch variation was measured in this clip; this is a descriptive signal measurement.")
+    elif metrics.get("pitch_std_hz") is not None:
+        audio_feedback.append("Pitch variation was measured; it is a descriptive acoustic feature.")
+        
+    return {
+        "audio_metrics": metrics,
+        "speech_feedback": audio_feedback
+    }
+
+
+@app.post("/api/v1/assess/multimodal")
+async def assess_multimodal(
+    question: str = Form(...),
+    reference_answer: str = Form(""),
+    candidate_answer: str = Form(...),
+    manner_of_speaking: int = Form(4),
+    mental_alertness: int = Form(4),
+    self_confidence: int = Form(4),
+    ability_to_present_ideas: int = Form(4),
+    communication_skills: int = Form(4),
+    audio_file: Optional[UploadFile] = File(None)
+):
+    """
+    Comprehensive Multimodal Assessment: Text + Soft Skills + Optional Audio.
+    """
+    if text_assessor is None:
+        raise HTTPException(status_code=503, detail="Text assessment engine not loaded.")
+    if employability_model is None:
+        raise HTTPException(status_code=503, detail="Employability model pipeline is not loaded.")
+
+    q = question.strip()
+    ans = candidate_answer.strip()
+    ref = reference_answer.strip() if reference_answer else q
+    if not q:
+        raise HTTPException(status_code=400, detail="Question cannot be empty.")
+    if len(ans.split()) < 3:
+        raise HTTPException(status_code=400, detail="Answer is too short to evaluate (minimum 3 words).")
+
+    ratings = [manner_of_speaking, mental_alertness, self_confidence, ability_to_present_ideas, communication_skills]
+    if not all(1 <= r <= 5 for r in ratings):
+        raise HTTPException(status_code=422, detail="Soft skill ratings must be integers between 1 and 5.")
+
+    # 1. Text assessment
+    text_res = await run_in_threadpool(text_assessor.assess_answer, q, ans, ref)
+    
+    # 2. Soft skills employability prediction
+    features_dict = {
+        "MANNER OF SPEAKING": manner_of_speaking,
+        "MENTAL ALERTNESS": mental_alertness,
+        "SELF-CONFIDENCE": self_confidence,
+        "ABILITY TO PRESENT IDEAS": ability_to_present_ideas,
+        "COMMUNICATION SKILLS": communication_skills,
+    }
+    raw_vals = list(features_dict.values())
+    features_dict["soft_skill_mean"] = float(np.mean(raw_vals))
+    features_dict["soft_skill_min"] = int(np.min(raw_vals))
+    
+    prediction_frame = pd.DataFrame([features_dict])
+    emp_pred, proba = await run_in_threadpool(
+        lambda: (employability_model.predict(prediction_frame)[0], employability_model.predict_proba(prediction_frame)[0])
+    )
+    emp_idx = list(employability_model.classes_).index("Employable")
+    p_emp = float(proba[emp_idx])
+    
+    # 3. Audio assessment if file provided
+    audio_metrics = None
+    if audio_file is not None:
+        audio_data = await audio_file.read(MAX_AUDIO_BYTES + 1)
+        try:
+            audio_ext = _validate_audio_bytes(audio_file.filename or "", audio_file.content_type or "", audio_data)
+        finally:
+            await audio_file.close()
+        _log_event("audio_upload_received", file_format=audio_ext, audio_bytes=len(audio_data))
+        audio_metrics = await run_in_threadpool(
+            _analyze_audio_bytes, audio_file.filename or "recording.wav", audio_data, ans
+        )
+                    
+    result = {
+        "overall_status": "Evaluation Complete",
+        "employability_result": {
+            "prediction": emp_pred,
+            "employability_probability": round(p_emp, 4)
+        },
+        "text_evaluation": text_res,
+        "speech_acoustic_evaluation": audio_metrics
+    }
+    _log_event("multimodal_assessment_completed", employability_prediction=emp_pred,
+               audio_included=audio_metrics is not None)
+    return result
+

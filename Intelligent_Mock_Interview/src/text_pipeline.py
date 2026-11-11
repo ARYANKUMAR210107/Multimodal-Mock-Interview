@@ -23,7 +23,7 @@ IMPORTANT ARCHITECTURAL RULE:
 =============================================================================
 """
 
-import os, re, json, string
+import os, re, json, string, math, numbers
 import pandas as pd
 import numpy as np
 import joblib
@@ -61,6 +61,31 @@ STOPWORDS = {
     "who", "whom", "why", "with", "won't", "would", "wouldn't", "you", "your",
     "yours", "yourself", "yourselves"
 }
+
+TEXT_ASSESSMENT_WEIGHTS = {
+    "relevance_score": 0.50,
+    "question_alignment_score": 0.20,
+    "keyword_overlap": 0.15,
+    "structure_score": 0.15,
+}
+
+
+def calculate_text_assessment_score(scores: dict) -> float:
+    """Return the existing transparent text-only score on a 0–1 scale.
+
+    Each component must be a finite numeric value in [0, 1]. This is a
+    heuristic practice score; it is not a validated hiring or voice score.
+    """
+    weighted_total = 0.0
+    for component, weight in TEXT_ASSESSMENT_WEIGHTS.items():
+        value = scores.get(component)
+        if isinstance(value, bool) or not isinstance(value, numbers.Real):
+            raise ValueError(f"{component} must be a numeric value in [0, 1].")
+        value = float(value)
+        if not math.isfinite(value) or not 0.0 <= value <= 1.0:
+            raise ValueError(f"{component} must be a finite numeric value in [0, 1].")
+        weighted_total += weight * value
+    return round(weighted_total, 4)
 
 
 # ── Text Cleaning & Normalization ──────────────────────────────────────────
@@ -212,9 +237,13 @@ class InterviewTextAssessor:
         jaccard = self.compute_jaccard_overlap(candidate_answer, reference_answer)
         structure = self.compute_structural_score(candidate_answer)
         
-        # Composite score calculation (explainable weighting)
-        composite = (0.50 * relevance) + (0.20 * q_align) + (0.15 * jaccard) + (0.15 * structure)
-        q_score = float(np.clip(composite, 0.0, 1.0))
+        # Text-only heuristic. Raw audio measurements are deliberately excluded.
+        q_score = calculate_text_assessment_score({
+            "relevance_score": relevance,
+            "question_alignment_score": q_align,
+            "keyword_overlap": jaccard,
+            "structure_score": structure,
+        })
         
         # Qualitative feedback generation
         strengths = []

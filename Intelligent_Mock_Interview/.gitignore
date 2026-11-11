@@ -51,7 +51,17 @@ logs/
 tmp/
 temp/
 
+# Local persistent interview records and optional raw audio uploads
+data/*.sqlite3
+data/*.sqlite3-*
+data/audio/
+
 
 # HuggingFace cache
 .cache/
+
+
+# Local runtime data
+data/backups/
+data/audio_recordings/
 

@@ -1,0 +1,29 @@
+[client]
+showSidebarNavigation = false
+
+[theme]
+base = "dark"
+primaryColor = "#06B6D4"
+backgroundColor = "#0B0F19"
+secondaryBackgroundColor = "#111A2E"
+textColor = "#F8FAFC"
+font = "Inter:https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap"
+borderColor = "#1E293B"
+baseRadius = "10px"
+buttonRadius = "8px"
+showWidgetBorder = true
+showSidebarBorder = true
+chartCategoricalColors = ["#06B6D4", "#3B82F6", "#10B981", "#F59E0B", "#EF4444", "#8B5CF6"]
+dataframeHeaderBackgroundColor = "#152238"
+dataframeHeaderTextColor = "#F8FAFC"
+
+[theme.sidebar]
+backgroundColor = "#0D1424"
+secondaryBackgroundColor = "#111A2E"
+textColor = "#F8FAFC"
+borderColor = "#1E293B"
+primaryColor = "#06B6D4"
+linkColor = "#06B6D4"
+
+[server]
+headless = true

@@ -5,3 +5,17 @@ __pycache__/
 *.pyc
 .ipynb_checkpoints/
 .DS_Store
+
+# Local tooling and IDE
+.kilo/
+.vscode/
+
+# Local screenshots/artifacts
+after_fix_*.png
+before_fix_*.png
+
+# SQLite databases
+*.sqlite3
+*.sqlite3-shm
+*.sqlite3-wal
+*.sqlite3.backup_*
