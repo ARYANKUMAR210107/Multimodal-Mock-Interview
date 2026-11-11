@@ -1,4 +1,4 @@
-﻿# InterviewAI – Intelligent Multimodal Mock Interview Assessment System
+# InterviewAI – Intelligent Multimodal Mock Interview Assessment System
 
 [![Python](https://img.shields.io/badge/Python-3.11%20%7C%203.14-blue.svg)](https://www.python.org/)
 [![FastAPI](https://img.shields.io/badge/FastAPI-0.100+-green.svg)](https://fastapi.tiangolo.com/)
