@@ -22,9 +22,9 @@ def render_system_status(nav_to_fn):
     meta = client.get_model_meta()
 
     s_api = "online" if health.get("online") else "offline"
-    is_gemini_ready = bool(health.get("gemini_configured"))
-    s_gemini = "online" if is_gemini_ready else "warning"
-    gemini_model = health.get("transcription_model") or "gemini-3.5-transcribe"
+    is_whisper_ready = bool(health.get("online") and health.get("transcription_configured", True))
+    s_whisper = "online" if is_whisper_ready else "offline"
+    whisper_model = health.get("transcription_model") or "base.en"
 
     # 1. Subsystems Status Grid
     c1, c2 = st.columns(2, gap="large")
@@ -77,15 +77,15 @@ def render_system_status(nav_to_fn):
     with c2, st.container(border=True):
         section_header("AI & ML Signal Processing Engines")
 
-        # Gemini STT
+        # faster-whisper STT
         st.markdown(
             f"""
             <div style="display: flex; justify-content: space-between; align-items: center; padding: 0.65rem 0; border-bottom: 1px solid var(--iai-border);">
                 <div>
-                    <strong>Google Gemini Speech-to-Text</strong>
-                    <div style="font-size: 0.8rem; color: var(--iai-muted);">Speech Recognition Engine ({gemini_model})</div>
+                    <strong>faster-whisper Speech-to-Text</strong>
+                    <div style="font-size: 0.8rem; color: var(--iai-muted);">Local Speech Recognition Engine ({whisper_model})</div>
                 </div>
-                <div>{status_pill(s_gemini, 'Configured & Ready' if is_gemini_ready else 'API Key Missing')}</div>
+                <div>{status_pill(s_whisper, 'Offline & Operational' if is_whisper_ready else 'Unavailable')}</div>
             </div>
             """,
             unsafe_allow_html=True,

@@ -46,94 +46,53 @@ class VoiceApiTests(unittest.TestCase):
         self.assertIsInstance(response.json()["transcription_configured"], bool)
         self.assertEqual(response.headers["X-Request-ID"], "RESP-0123456789AB")
 
-    def test_missing_api_key_returns_safe_configuration_error(self):
-        with patch.object(api, "_get_gemini_api_key", return_value=""):
-            response = self.client.post(
-                "/api/audio/transcribe",
-                files={"file": ("answer.wav", wav_stub(), "audio/wav")},
-            )
-        self.assertEqual(response.status_code, 503)
-        self.assertIn("Google Gemini transcription is not configured", response.json()["detail"])
-        self.assertNotIn("GEMINI_API_KEY=", response.text)
-
-    def test_gemini_client_configures_bounded_sdk_timeout(self):
-        with patch.object(api, "_get_gemini_api_key", return_value="mock-key"), patch.object(api.genai, "Client") as client_factory:
-            api._get_gemini_client()
-        options = client_factory.call_args.kwargs["http_options"]
-        self.assertEqual(options.timeout, int(api.GEMINI_REQUEST_TIMEOUT_SECONDS * 1000))
-        self.assertEqual(options.retry_options.attempts, 2)
-        self.assertNotIn(429, options.retry_options.http_status_codes)
-
-    def test_transcription_uses_gemini(self):
-        fake_client = MagicMock()
-        mock_response = MagicMock()
-        mock_response.output_text = "A corrected answer."
-        fake_client.files.upload.return_value.uri = "files/mock-audio"
-        fake_client.files.upload.return_value.name = "files/mock-audio"
-        fake_client.interactions.create.return_value = mock_response
-        with patch.object(api, "_get_gemini_client", return_value=fake_client):
+    def test_transcription_uses_faster_whisper(self):
+        mock_result = {
+            "transcript": "A corrected answer.",
+            "detected_language": "en",
+            "language_probability": 0.99,
+        }
+        with patch.object(api.transcription_service, "transcribe", return_value=mock_result):
             response = self.client.post(
                 "/api/audio/transcribe",
                 files={"file": ("answer.wav", wav_stub(), "audio/wav")},
             )
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.json()["transcript"], "A corrected answer.")
-        self.assertEqual(response.json()["provider"], "gemini")
-        self.assertIn("gemini", response.json()["model"].lower())
-        self.assertEqual(
-            fake_client.interactions.create.call_args.kwargs["timeout"],
-            api.GEMINI_REQUEST_TIMEOUT_SECONDS,
-        )
+        self.assertEqual(response.json()["provider"], "faster-whisper")
+        self.assertIn("whisper", response.json()["model"].lower())
 
-    def test_transcription_timeout_maps_to_504_without_provider_details(self):
-        fake_client = MagicMock()
-        fake_client.files.upload.return_value.uri = "files/mock-audio"
-        fake_client.files.upload.return_value.name = "files/mock-audio"
-        fake_client.interactions.create.side_effect = httpx.TimeoutException("private provider payload")
-        with patch.object(api, "_get_gemini_client", return_value=fake_client):
-            response = self.client.post(
-                "/api/audio/transcribe",
-                files={"file": ("answer.wav", wav_stub(), "audio/wav")},
-            )
-        self.assertEqual(response.status_code, 504)
-        self.assertNotIn("private provider payload", response.text)
-
-    def test_transcription_network_failure_maps_to_502(self):
-        fake_client = MagicMock()
-        fake_client.files.upload.return_value.uri = "files/mock-audio"
-        fake_client.files.upload.return_value.name = "files/mock-audio"
-        fake_client.interactions.create.side_effect = httpx.ConnectError("offline")
-        with patch.object(api, "_get_gemini_client", return_value=fake_client):
+    def test_transcription_failure_maps_to_502(self):
+        with patch.object(api.transcription_service, "transcribe", side_effect=RuntimeError("Whisper decode error")):
             response = self.client.post(
                 "/api/audio/transcribe",
                 files={"file": ("answer.wav", wav_stub(), "audio/wav")},
             )
         self.assertEqual(response.status_code, 502)
+        self.assertIn("Transcription failed", response.json()["detail"])
 
     def test_mp3_upload_uses_supported_mime_and_is_forwarded(self):
-        fake_client = MagicMock()
-        fake_client.files.upload.return_value.uri = "files/mock-mp3"
-        fake_client.files.upload.return_value.name = "files/mock-mp3"
-        fake_client.interactions.create.return_value.output_text = "Mocked MP3 transcript."
-        with patch.object(api.audio_analyzer, "load_audio", return_value=([0.0] * 16000, 16000)), patch.object(api, "_get_gemini_client", return_value=fake_client):
+        mock_result = {
+            "transcript": "Mocked MP3 transcript.",
+            "detected_language": "en",
+            "language_probability": 0.98,
+        }
+        with patch.object(api.transcription_service, "transcribe", return_value=mock_result):
             response = self.client.post(
                 "/api/audio/transcribe",
                 files={"file": ("answer.mp3", b"ID3" + b"\x00" * 20, "audio/mpeg")},
             )
         self.assertEqual(response.status_code, 200, response.text)
         self.assertEqual(response.json()["transcript"], "Mocked MP3 transcript.")
-        call = fake_client.interactions.create.call_args.kwargs
-        self.assertEqual(call["input"][0]["mime_type"], "audio/mp3")
 
-    def test_short_recording_is_rejected_before_gemini_upload(self):
-        fake_client = MagicMock()
-        with patch.object(api, "_get_gemini_client", return_value=fake_client):
+    def test_empty_speech_transcription_returns_422(self):
+        mock_result = {"transcript": "", "detected_language": "unknown", "language_probability": 0.0}
+        with patch.object(api.transcription_service, "transcribe", return_value=mock_result):
             response = self.client.post(
                 "/api/audio/transcribe",
-                files={"file": ("short.wav", wav_stub(duration=0.1), "audio/wav")},
+                files={"file": ("answer.wav", wav_stub(), "audio/wav")},
             )
         self.assertEqual(response.status_code, 422)
-        fake_client.files.upload.assert_not_called()
 
     def test_rejects_unsupported_and_over_limit_uploads(self):
         unsupported = self.client.post(

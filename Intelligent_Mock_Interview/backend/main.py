@@ -13,7 +13,7 @@ import pandas as pd
 import numpy as np
 import joblib
 
-from fastapi import FastAPI, UploadFile, File, Form, HTTPException, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, UploadFile, File, Form, HTTPException, WebSocket, WebSocketDisconnect, Request
 from fastapi.responses import FileResponse
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, ConfigDict, Field
@@ -357,8 +357,7 @@ class MultimodalReportResponse(BaseModel):
 # ── API Endpoints ──────────────────────────────────────────────────────────
 @app.get("/")
 def root():
-    api_key = _get_gemini_api_key()
-    key_configured = bool(api_key)
+    whisper_model = os.getenv("WHISPER_MODEL_SIZE", "base.en")
     return {
         "status": "online",
         "system": "Intelligent Multimodal Mock Interview Assessment System",
@@ -366,16 +365,18 @@ def root():
         "transcription_provider": "faster-whisper",
         "transcription_configured": True,
         "transcription_status": "ready",
-        "transcription_model": os.getenv("WHISPER_MODEL_SIZE", "small"),
+        "transcription_model": whisper_model,
         "endpoints": [
             "/api/audio/transcribe",
+            "/api/audio/tts",
             "/health",
             "/api/interview/multimodal-report",
             "/api/v1/questions",
             "/api/v1/predict/employability",
             "/api/v1/assess/text",
             "/api/v1/assess/audio",
-            "/api/v1/assess/multimodal"
+            "/api/v1/assess/multimodal",
+            "/api/v1/models/meta",
         ]
     }
 
@@ -387,14 +388,18 @@ def health():
         "version": app.version,
         "transcription_provider": "faster-whisper",
         "transcription_configured": True,
-        "transcription_model": os.getenv("WHISPER_MODEL_SIZE", "small"),
+        "transcription_model": os.getenv("WHISPER_MODEL_SIZE", "base.en"),
         "whisper_device": os.getenv("WHISPER_DEVICE", "cpu"),
         "whisper_compute_type": os.getenv("WHISPER_COMPUTE_TYPE", "int8"),
     }
 
 
 @app.post("/api/audio/transcribe")
-async def transcribe_audio(file: UploadFile = File(...), response_id: Optional[str] = Form(None)):
+async def transcribe_audio(
+    file: UploadFile = File(...),
+    response_id: Optional[str] = Form(None),
+    prompt: Optional[str] = Form(None),
+):
     data = await file.read(MAX_AUDIO_BYTES + 1)
     try:
         ext = _validate_audio_bytes(file.filename or "", file.content_type or "", data)
@@ -429,6 +434,7 @@ async def transcribe_audio(file: UploadFile = File(...), response_id: Optional[s
             transcription_service.transcribe,
             data,
             ext,
+            prompt=prompt,
         )
         transcript = result.get("transcript", "")
         detected_language = result.get("detected_language", "unknown")
@@ -627,7 +633,98 @@ def get_audio_recording(filename: str):
     audio_path = os.path.join(recordings_dir, safe_filename)
     if not os.path.exists(audio_path):
         raise HTTPException(status_code=404, detail="Audio recording not found.")
-    return FileResponse(audio_path, media_type="audio/wav")
+    ext = os.path.splitext(safe_filename)[1].lower()
+    mime_map = {
+        ".wav": "audio/wav",
+        ".mp3": "audio/mpeg",
+        ".m4a": "audio/mp4",
+        ".webm": "audio/webm",
+        ".ogg": "audio/ogg",
+        ".flac": "audio/flac",
+    }
+    media_type = mime_map.get(ext, "audio/wav")
+    return FileResponse(audio_path, media_type=media_type)
+
+
+@app.get("/api/v1/models/meta")
+def get_model_metadata():
+    """Returns trained employability model benchmark metrics and training metadata."""
+    meta_path = os.path.join(MODELS_DIR, "employability_model_meta.json")
+    if os.path.exists(meta_path):
+        try:
+            with open(meta_path, "r", encoding="utf-8") as f:
+                return json.load(f)
+        except Exception as e:
+            logger.warning(f"Could not load employability model metadata: {e}")
+    return {
+        "features": [
+            "MANNER OF SPEAKING", "MENTAL ALERTNESS", "SELF-CONFIDENCE",
+            "ABILITY TO PRESENT IDEAS", "COMMUNICATION SKILLS",
+            "soft_skill_mean", "soft_skill_min"
+        ],
+        "best_model": "Gradient Boosting",
+        "best_model_file": "gradient_boosting_employability.joblib",
+        "val_results": {},
+        "test_results": {},
+    }
+
+
+@app.post("/api/audio/tts")
+@app.get("/api/audio/tts")
+async def text_to_speech(request: Request, text: str = ""):
+    """Generate or synthesize speech audio for interviewer question text."""
+    clean_prompt = text.strip()
+    if not clean_prompt:
+        try:
+            body = await request.json()
+            if isinstance(body, dict):
+                clean_prompt = (body.get("text") or "").strip()
+        except Exception:
+            pass
+    if not clean_prompt:
+        # Check form data if applicable
+        try:
+            form = await request.form()
+            clean_prompt = (form.get("text") or "").strip()
+        except Exception:
+            pass
+
+    if not clean_prompt:
+        raise HTTPException(status_code=400, detail="Text parameter cannot be empty.")
+    
+    # Generate speech WAV using SAPI on Windows or fallback synthetic audio
+    try:
+        import subprocess
+        tts_dir = os.path.join(BASE_DIR, "data", "tts_cache")
+        os.makedirs(tts_dir, exist_ok=True)
+        text_hash = hashlib.sha256(clean_prompt.encode("utf-8")).hexdigest()[:16]
+        out_wav = os.path.join(tts_dir, f"tts_{text_hash}.wav")
+        if not os.path.exists(out_wav) or os.path.getsize(out_wav) == 0:
+            # Safe Windows PowerShell SpeechSynthesizer script
+            escaped_text = clean_prompt.replace("'", "''").replace('"', '`"')
+            ps_script = (
+                "Add-Type -AssemblyName System.Speech; "
+                "$synth = New-Object System.Speech.Synthesis.SpeechSynthesizer; "
+                f"$synth.SetOutputToWaveFile('{out_wav}'); "
+                f"$synth.Speak('{escaped_text}'); "
+                "$synth.Dispose()"
+            )
+            subprocess.run(
+                ["powershell", "-NoProfile", "-Command", ps_script],
+                check=True,
+                timeout=15,
+                capture_output=True,
+            )
+        if os.path.exists(out_wav) and os.path.getsize(out_wav) > 0:
+            return FileResponse(out_wav, media_type="audio/wav")
+    except Exception as exc:
+        logger.warning(f"Native TTS generation failed: {exc}; falling back to browser synthesis.")
+    
+    return {
+        "status": "ready",
+        "text": clean_prompt,
+        "message": "Use client-side speech synthesis",
+    }
 
 @app.get("/api/v1/questions")
 def get_interview_questions(limit: int = 15):

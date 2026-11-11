@@ -19,3 +19,10 @@ before_fix_*.png
 *.sqlite3-shm
 *.sqlite3-wal
 *.sqlite3.backup_*
+
+# Agent metadata & caches
+.agents/
+skills-lock.json
+data/tts_cache/
+Intelligent_Mock_Interview/data/tts_cache/
+*.log

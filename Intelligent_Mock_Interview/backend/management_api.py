@@ -319,6 +319,20 @@ def list_question_bank(domain: Optional[str] = None, difficulty: Optional[str] =
                 "domains": [{"domain": d, "count": n} for d, n in domains]}
 
 
+@router.get("/questions/domains")
+def get_question_domains():
+    """Returns distinct question domains available in QuestionBank."""
+    with db_session() as db:
+        domains = db.scalars(select(QuestionBank.domain).distinct().order_by(QuestionBank.domain)).all()
+        if not domains:
+            domains = [
+                "Python", "C++", "Java", "Data Structures & Algorithms",
+                "DBMS", "Operating Systems", "Computer Networks", "Machine Learning",
+                "Artificial Intelligence", "Web Development", "Software Engineering", "HR & Behavioral"
+            ]
+        return {"domains": list(domains)}
+
+
 @router.post("/questions", status_code=201)
 def create_question(payload: QuestionInput):
     data = payload.model_dump()
@@ -431,7 +445,9 @@ def list_sessions(student_id: Optional[str] = None, user_id: Optional[str] = Non
                 stmt = stmt.where(InterviewSession.status == status)
         sessions = db.scalars(stmt).all()
         return {"sessions": [{"id": s.id, "student_id": s.student_id,
-                               "student_name": s.student.full_name, "title": s.title,
+                               "student": _student_dict(s.student) if s.student else {},
+                               "student_name": s.student.full_name if s.student else "Unknown",
+                               "title": s.title,
                                "domain": s.domain, "difficulty": s.difficulty, "mode": s.mode,
                                "question_count": s.question_count, "current_position": s.current_position,
                                "status": s.status, "text_status": s.text_status,
@@ -847,13 +863,21 @@ def get_current_user_profile(authorization: Optional[str] = Header(None)):
 
 @router.post("/auth/change-password")
 def change_user_password(payload: ChangePasswordInput, authorization: Optional[str] = Header(None)):
-    """Change the authenticated user's password."""
+    """Change the authenticated user's password and invalidate other sessions."""
     with db_session() as db:
         user = _get_current_user(db, authorization)
         if not verify_password(payload.current_password, user.password_hash):
             raise HTTPException(401, "Current password is incorrect.")
         user.password_hash = hash_password(payload.new_password)
-        return {"message": "Password updated successfully."}
+        # Invalidate other active sessions for security
+        current_token = authorization.split(" ", 1)[1] if authorization and " " in authorization else None
+        if current_token:
+            other_sessions = db.scalars(
+                select(UserSession).where(UserSession.user_id == user.id, UserSession.token != current_token)
+            ).all()
+            for s in other_sessions:
+                db.delete(s)
+        return {"message": "Password updated successfully. Other active sessions revoked."}
 
 
 # ── Authorization Helpers for Protected Endpoints ────────────────────────────

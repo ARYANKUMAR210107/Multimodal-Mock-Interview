@@ -304,7 +304,7 @@ class APIClient:
         return False, err
 
     # ── Audio Transcription (Gemini) ─────────────────────────────────────────
-    def transcribe_audio(self, filename: str, audio_bytes: bytes, mime_type: Optional[str] = None) -> Tuple[bool, Any]:
+    def transcribe_audio(self, filename: str, audio_bytes: bytes, mime_type: Optional[str] = None, prompt: Optional[str] = None) -> Tuple[bool, Any]:
         # Auto-detect real MIME from magic bytes if default or empty
         if not mime_type or mime_type == "audio/wav":
             if audio_bytes.startswith(b"\x1a\x45\xdf\xa3"):
@@ -319,8 +319,11 @@ class APIClient:
                 mime_type = "audio/mp4"
 
         files = {"file": (filename, audio_bytes, mime_type or "audio/wav")}
+        data = {}
+        if prompt:
+            data["prompt"] = prompt
         try:
-            res = self.post("/api/audio/transcribe", files=files, timeout=UPLOAD_TIMEOUT)
+            res = self.post("/api/audio/transcribe", files=files, data=data, timeout=UPLOAD_TIMEOUT)
             if res.ok:
                 try:
                     return True, res.json()
@@ -343,6 +346,31 @@ class APIClient:
             return False, f"Could not reach transcription service: {str(e)}"
         except Exception as e:
             return False, f"Unexpected transcription error: {str(e)}"
+
+    # ── Text-to-Speech (TTS) ──────────────────────────────────────────────────
+    def get_tts_audio(self, text: str) -> Tuple[bool, Any]:
+        """Synthesize question text into spoken audio via backend or fallback.
+        
+        Returns:
+            Tuple[bool, Any]: (True, audio_bytes) if audio was synthesized,
+                              (False, message/detail) otherwise.
+        """
+        clean = (text or "").strip()
+        if not clean:
+            return False, "Text cannot be empty."
+        try:
+            res = self.get("/api/audio/tts", params={"text": clean}, timeout=25)
+            if res.ok:
+                ct = res.headers.get("content-type", "")
+                if "audio" in ct or res.content.startswith(b"RIFF"):
+                    return True, res.content
+                try:
+                    return False, res.json()
+                except Exception:
+                    return False, res.text
+            return False, f"HTTP {res.status_code}: {res.text}"
+        except Exception as e:
+            return False, str(e)
 
     # ── Multimodal Question Assessment ───────────────────────────────────────
     def assess_multimodal(self, question: str, corrected_transcript: str,

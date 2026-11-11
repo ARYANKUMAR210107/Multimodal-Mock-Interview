@@ -153,18 +153,18 @@ def render_dashboard(nav_to_fn):
             unsafe_allow_html=True,
         )
 
-        # Google Gemini Transcription
-        gemini_cfg = health.get("gemini_configured", False)
-        gemini_model = health.get("transcription_model") or "gemini-3.5-transcribe"
-        st_gemini = "online" if gemini_cfg else "warning"
+        # faster-whisper Speech-to-Text
+        whisper_model = health.get("transcription_model") or "base.en"
+        whisper_ready = health.get("online") and health.get("transcription_configured", True)
+        st_whisper = "online" if whisper_ready else "offline"
         st.markdown(
             f"""
             <div style="display: flex; justify-content: space-between; align-items: center; padding: 0.5rem 0; border-bottom: 1px solid var(--iai-border);">
                 <div>
-                    <strong>Google Gemini STT</strong>
-                    <div style="font-size: 0.78rem; color: var(--iai-muted);">Speech-to-text API ({gemini_model})</div>
+                    <strong>faster-whisper STT</strong>
+                    <div style="font-size: 0.78rem; color: var(--iai-muted);">Local Speech-to-Text Engine ({whisper_model})</div>
                 </div>
-                <div>{status_pill(st_gemini, 'Configured & Ready' if gemini_cfg else 'Key Missing')}</div>
+                <div>{status_pill(st_whisper, 'Offline & Ready' if whisper_ready else 'Unavailable')}</div>
             </div>
             """,
             unsafe_allow_html=True,

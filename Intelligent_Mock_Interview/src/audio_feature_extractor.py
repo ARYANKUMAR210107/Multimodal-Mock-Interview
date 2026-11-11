@@ -150,7 +150,7 @@ class CandidateAudioAnalyzer:
         y, sr = sf.read(io.BytesIO(audio_bytes))
         return self.extract_features_from_array(y, sr)
 
-    def analyze_audio_file(self, audio_path: str, include_heuristics: bool = True) -> dict:
+    def analyze_audio_file(self, audio_path: str, include_heuristics: bool = False) -> dict:
         """Helper to load from file path and compute full acoustic metrics."""
         y, sr = self.load_audio(audio_path)
         metrics = self.extract_features_from_array(y, sr)

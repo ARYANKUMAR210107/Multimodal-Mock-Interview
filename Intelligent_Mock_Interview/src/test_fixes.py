@@ -5,7 +5,7 @@ import os, sys, json, joblib
 import pandas as pd
 import numpy as np
 
-BASE = r"c:\Users\Asus\OneDrive\Desktop\intelligent_supervised\Intelligent_Mock_Interview"
+BASE = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.append(BASE)
 sys.path.append(os.path.join(BASE, "src"))
 
@@ -52,8 +52,12 @@ def test_all():
         "Polymorphism is the ability of different classes to respond to the same method call."
     )
     
-    fluency_norm = float(np.clip(audio_metrics["estimated_fluency_score"] / 5.0, 0.0, 1.0))
-    prosody_norm = float(np.clip(audio_metrics["estimated_prosody_score"] / 5.0, 0.0, 1.0))
+    pause_ratio = audio_metrics.get("pause_ratio") or 0.2
+    pitch_std = audio_metrics.get("pitch_std_hz") or 15.0
+    fluency_score = float(np.clip(5.0 - (pause_ratio * 7.0), 1.0, 5.0))
+    prosody_score = float(np.clip(1.0 + (pitch_std / 10.0), 1.0, 5.0))
+    fluency_norm = float(np.clip(fluency_score / 5.0, 0.0, 1.0))
+    prosody_norm = float(np.clip(prosody_score / 5.0, 0.0, 1.0))
     text_quality = float(text_metrics["quality_score"])
     composite = float(np.clip((0.50 * text_quality) + (0.25 * fluency_norm) + (0.25 * prosody_norm), 0.0, 1.0))
     

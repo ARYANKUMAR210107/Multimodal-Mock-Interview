@@ -16,7 +16,7 @@ import numpy as np
 import pandas as pd
 import joblib
 
-BASE_DIR = r"c:\Users\Asus\OneDrive\Desktop\intelligent_supervised\Intelligent_Mock_Interview"
+BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.append(BASE_DIR)
 sys.path.append(os.path.join(BASE_DIR, "src"))
 
@@ -90,7 +90,7 @@ def run_tests():
     print(f"File size on disk: {os.path.getsize(test_wav_path)} bytes")
     
     analyzer = CandidateAudioAnalyzer(target_sr=16000)
-    audio_metrics = analyzer.analyze_audio_file(test_wav_path)
+    audio_metrics = analyzer.analyze_audio_file(test_wav_path, include_heuristics=True)
     
     print("\nExtracted Audio Features via Librosa:")
     print(f"  - Total Duration:       {audio_metrics['duration_sec']} s")

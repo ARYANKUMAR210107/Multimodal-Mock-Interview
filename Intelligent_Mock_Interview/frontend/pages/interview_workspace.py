@@ -159,6 +159,42 @@ def render_interview_workspace(nav_to_fn):
         if q_concepts:
             st.markdown(f"<div style='font-size: 0.82rem; color: var(--iai-muted); margin-top: 0.4rem;'><strong>Key Concepts:</strong> {' · '.join(f'<code>{c}</code>' for c in q_concepts)}</div>", unsafe_allow_html=True)
 
+        # ── Text-to-Speech (TTS) Question Reader ─────────────────────────
+        tts_q_key = f"tts_audio_q_{current_pos}"
+        col_tts1, col_tts2 = st.columns([1, 2])
+        with col_tts1:
+            if st.button("🔊 Read Question Aloud", key=f"btn_read_q_{current_pos}", help="Listen to the question read aloud by the AI interviewer"):
+                with st.spinner("🔊 Synthesizing question audio…"):
+                    ok_tts, tts_data = client.get_tts_audio(q_text)
+                    if ok_tts and isinstance(tts_data, bytes):
+                        st.session_state[tts_q_key] = tts_data
+                        st.session_state[f"play_tts_{current_pos}"] = True
+                    else:
+                        st.session_state[f"use_browser_tts_{current_pos}"] = True
+                st.rerun()
+
+        with col_tts2:
+            if st.session_state.get(tts_q_key):
+                st.audio(st.session_state[tts_q_key], format="audio/wav", autoplay=st.session_state.get(f"play_tts_{current_pos}", False))
+                st.session_state[f"play_tts_{current_pos}"] = False
+            elif st.session_state.get(f"use_browser_tts_{current_pos}"):
+                safe_text = json.dumps(q_text)
+                st.components.v1.html(
+                    f"""
+                    <script>
+                        if ('speechSynthesis' in window) {{
+                            window.speechSynthesis.cancel();
+                            var msg = new SpeechSynthesisUtterance({safe_text});
+                            msg.rate = 0.95;
+                            window.speechSynthesis.speak(msg);
+                        }}
+                    </script>
+                    <div style="font-size: 0.8rem; color: #06b6d4;">🔊 Speaking question via browser voice engine…</div>
+                    """,
+                    height=35,
+                )
+                st.session_state[f"use_browser_tts_{current_pos}"] = False
+
         if q_ref:
             with st.expander("Benchmark Reference Answer (Evaluator Reference)"):
                 st.write(q_ref)
@@ -249,6 +285,26 @@ def render_interview_workspace(nav_to_fn):
     with t_voice:
         section_header("Spoken Technical Answer", "Record or upload audio to analyze pacing, pitch, and fluency")
 
+        # ── AI Interviewer Audio Prompt (TTS) ──────────────────────────────
+        with st.container(border=True):
+            st.markdown('<div class="page-eyebrow">AI INTERVIEWER AUDIO PROMPT</div>', unsafe_allow_html=True)
+            v_tts1, v_tts2 = st.columns([1, 2])
+            with v_tts1:
+                if st.button("🎧 Listen to Interviewer Question", key=f"btn_v_listen_{current_pos}", use_container_width=True):
+                    with st.spinner("Loading interviewer audio…"):
+                        ok_tts, tts_data = client.get_tts_audio(q_text)
+                        if ok_tts and isinstance(tts_data, bytes):
+                            st.session_state[tts_q_key] = tts_data
+                            st.session_state[f"play_tts_{current_pos}"] = True
+                        else:
+                            st.session_state[f"use_browser_tts_{current_pos}"] = True
+                    st.rerun()
+            with v_tts2:
+                if st.session_state.get(tts_q_key):
+                    st.audio(st.session_state[tts_q_key], format="audio/wav")
+                else:
+                    st.caption("Click the button to listen to the AI interviewer read this question before recording.")
+
         # ── STEP 1: Audio Capture ──────────────────────────────────────────
         with st.container(border=True):
             st.markdown('<div class="page-eyebrow">STEP 1 · CAPTURE AUDIO</div>', unsafe_allow_html=True)
@@ -259,8 +315,8 @@ def render_interview_workspace(nav_to_fn):
                 key=f"src_radio_{current_pos}",
             )
 
-            captured_audio_bytes = None
-            audio_name = f"recording_q{current_pos}.wav"
+            cached_audio_key = f"cached_audio_bytes_{session_id}_{current_pos}"
+            cached_name_key = f"cached_audio_name_{session_id}_{current_pos}"
 
             if "Microphone" in audio_src:
                 st.caption("💡 Tip: Speak clearly at a normal pace. Recording starts when you click the microphone.")
@@ -269,8 +325,10 @@ def render_interview_workspace(nav_to_fn):
                     key=f"mic_input_{current_pos}",
                 )
                 if mic_recording is not None:
-                    captured_audio_bytes = mic_recording.read()
-                    audio_name = mic_recording.name or f"mic_q{current_pos}.webm"
+                    raw_bytes = mic_recording.getvalue() if hasattr(mic_recording, "getvalue") else mic_recording.read()
+                    if raw_bytes:
+                        st.session_state[cached_audio_key] = raw_bytes
+                        st.session_state[cached_name_key] = getattr(mic_recording, "name", None) or f"mic_q{current_pos}.webm"
             else:
                 st.caption("Supported formats: WAV, MP3, M4A, WebM — Maximum recommended: 10 MB")
                 file_upload = st.file_uploader(
@@ -279,8 +337,13 @@ def render_interview_workspace(nav_to_fn):
                     key=f"file_uploader_{current_pos}",
                 )
                 if file_upload is not None:
-                    captured_audio_bytes = file_upload.read()
-                    audio_name = file_upload.name
+                    raw_bytes = file_upload.getvalue() if hasattr(file_upload, "getvalue") else file_upload.read()
+                    if raw_bytes:
+                        st.session_state[cached_audio_key] = raw_bytes
+                        st.session_state[cached_name_key] = file_upload.name
+
+            captured_audio_bytes = st.session_state.get(cached_audio_key)
+            audio_name = st.session_state.get(cached_name_key, f"recording_q{current_pos}.wav")
 
         # ── STEP 2: Playback + Status Banner ──────────────────────────────
         if captured_audio_bytes:
@@ -290,21 +353,30 @@ def render_interview_workspace(nav_to_fn):
                 f"""
                 <div style="background: rgba(6,182,212,0.08); border: 1px solid rgba(6,182,212,0.3);
                     border-radius: 8px; padding: 0.65rem 1rem; margin: 0.5rem 0 0.75rem;
-                    display: flex; align-items: center; gap: 0.75rem;">
-                    <span style="font-size: 1.3rem;">🎵</span>
-                    <div>
-                        <div style="font-weight: 700; color: var(--iai-primary); font-size: 0.88rem;">
-                            Audio Ready — {audio_name}
-                        </div>
-                        <div style="color: var(--iai-muted); font-size: 0.78rem;">
-                            {audio_kb:.1f} KB · ~{audio_duration_est:.0f}s est. duration · Ready for transcription
+                    display: flex; align-items: center; justify-content: space-between;">
+                    <div style="display: flex; align-items: center; gap: 0.75rem;">
+                        <span style="font-size: 1.3rem;">🎵</span>
+                        <div>
+                            <div style="font-weight: 700; color: var(--iai-primary); font-size: 0.88rem;">
+                                Audio Ready — {audio_name}
+                            </div>
+                            <div style="color: var(--iai-muted); font-size: 0.78rem;">
+                                {audio_kb:.1f} KB · ~{audio_duration_est:.0f}s est. duration · Ready for transcription
+                            </div>
                         </div>
                     </div>
                 </div>
                 """,
                 unsafe_allow_html=True,
             )
-            st.audio(captured_audio_bytes)
+            col_audio_play, col_audio_reset = st.columns([4, 1])
+            with col_audio_play:
+                st.audio(captured_audio_bytes)
+            with col_audio_reset:
+                if st.button("🗑️ Reset Audio", key=f"btn_reset_audio_{current_pos}", help="Clear recording"):
+                    st.session_state.pop(cached_audio_key, None)
+                    st.session_state.pop(cached_name_key, None)
+                    st.rerun()
 
         # ── STEP 3: Transcription ──────────────────────────────────────────
         st.write("")
@@ -313,6 +385,7 @@ def render_interview_workspace(nav_to_fn):
             st.caption("faster-whisper converts your speech to text. You can review and correct the transcript before scoring.")
 
             tr_key = f"voice_tr_editor_{session_id}_{current_pos}"
+            ta_key = f"ta_transcript_{current_pos}"
             existing_transcript = (
                 voice_resp.get("corrected_transcript")
                 or voice_resp.get("original_transcript")
@@ -350,7 +423,9 @@ def render_interview_workspace(nav_to_fn):
                         len(captured_audio_bytes), audio_name, session_id, current_pos
                     )
                     with st.spinner("🔄 Transcribing audio with faster-whisper…"):
-                        ok, t_res = client.transcribe_audio(audio_name, captured_audio_bytes)
+                        # Prime Whisper decoder with question and domain keywords
+                        q_prompt = f"Technical mock interview. Question: {q_text}. Expected concepts: {', '.join(q_concepts)}."
+                        ok, t_res = client.transcribe_audio(audio_name, captured_audio_bytes, prompt=q_prompt)
                         _diag_logger.info(
                             "API_RESPONSE ok=%s type=%s keys=%s transcript_len=%d",
                             ok, type(t_res).__name__,
@@ -361,6 +436,7 @@ def render_interview_workspace(nav_to_fn):
                             raw_transcript = t_res.get("transcript", "")
                             detected_lang = t_res.get("detected_language", "unknown")
                             st.session_state[tr_key] = raw_transcript
+                            st.session_state[ta_key] = raw_transcript
                             st.session_state[f"orig_tr_{current_pos}"] = raw_transcript
                             st.session_state[f"det_lang_{current_pos}"] = detected_lang
                             _diag_logger.info(
@@ -399,19 +475,39 @@ def render_interview_workspace(nav_to_fn):
 
             # Transcript text area - always visible for manual entry fallback
             st.write("")
+            if ta_key not in st.session_state:
+                st.session_state[ta_key] = st.session_state.get(tr_key, existing_transcript)
+
             editable_transcript = st.text_area(
                 "Reviewed Transcript:",
-                value=st.session_state.get(tr_key, existing_transcript),
                 height=130,
-                key=f"ta_transcript_{current_pos}",
+                key=ta_key,
                 placeholder="Transcribed speech appears here after Whisper processing, or type a manual transcript to proceed…",
             )
+            # Sync session state
+            st.session_state[tr_key] = editable_transcript
+
             word_count_v = len(editable_transcript.strip().split()) if editable_transcript.strip() else 0
             st.caption(f"Transcript word count: **{word_count_v}** words (minimum 3 required for multimodal scoring)")
 
-            # Show saved transcript indicator
-            if voice_resp.get("corrected_transcript") or voice_resp.get("original_transcript"):
-                st.caption("✅ A saved transcript exists for this question from a previous session.")
+            # Transcript draft action buttons
+            col_save_draft, col_draft_info = st.columns([1, 2])
+            with col_save_draft:
+                if st.button("💾 Save Transcript Draft", key=f"btn_save_tr_{current_pos}", use_container_width=True):
+                    if editable_transcript.strip():
+                        saved = client.save_response_draft(session_id, current_pos, {
+                            "answer_text": editable_transcript.strip(),
+                            "response_mode": "voice",
+                        })
+                        if saved:
+                            st.success("Draft saved to session database.")
+                        else:
+                            st.error("Could not save draft.")
+                    else:
+                        st.warning("Type or transcribe an answer before saving draft.")
+            with col_draft_info:
+                if voice_resp.get("corrected_transcript") or voice_resp.get("original_transcript"):
+                    st.caption("✅ A saved transcript exists for this question from a previous session.")
 
         # ── STEP 4: Multimodal Assessment ─────────────────────────────────
         st.write("")

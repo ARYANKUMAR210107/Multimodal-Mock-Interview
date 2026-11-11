@@ -103,24 +103,28 @@ def render_new_assessment(nav_to_fn):
     col_l, col_r = st.columns([1, 1], gap="medium")
     with col_r:
         if st.button("Create assessment and start", type="primary", use_container_width=True):
-            payload = {
-                "student_id": selected_student_id,
-                "domain": domain,
-                "difficulty": difficulty,
-                "mode": mode[0],
-                "question_count": question_count,
-                "time_limit_minutes": time_limit,
-                "title": f"{domain} Interview",
-            }
-            with st.spinner("Configuring session and assigning benchmark questions…"):
-                success, res = client.create_session(payload)
-                if success:
-                    session_id = res.get("id")
-                    st.session_state["active_interview_session_id"] = session_id
-                    st.success(f"Session created successfully! Session ID: `{session_id}`")
-                    nav_to_fn("Active Workspace")
-                else:
-                    st.error(f"Failed to create session: {res}")
+            if avail_cnt == 0:
+                st.error(f"Cannot create assessment: 0 questions available for {domain} ({difficulty}). Please choose another domain or difficulty.")
+            else:
+                effective_question_count = min(avail_cnt, question_count)
+                payload = {
+                    "student_id": selected_student_id,
+                    "domain": domain,
+                    "difficulty": difficulty,
+                    "mode": mode[0],
+                    "question_count": effective_question_count,
+                    "time_limit_minutes": time_limit,
+                    "title": f"{domain} Interview",
+                }
+                with st.spinner("Configuring session and assigning benchmark questions…"):
+                    success, res = client.create_session(payload)
+                    if success:
+                        session_id = res.get("id")
+                        st.session_state["active_interview_session_id"] = session_id
+                        st.success(f"Session created successfully! Session ID: `{session_id}` ({effective_question_count} questions assigned)")
+                        nav_to_fn("Active Workspace")
+                    else:
+                        st.error(f"Failed to create session: {res}")
     with col_l:
         if st.button("Cancel", use_container_width=True):
             nav_to_fn("Dashboard")

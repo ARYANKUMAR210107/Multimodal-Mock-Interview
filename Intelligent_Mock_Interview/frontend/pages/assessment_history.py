@@ -41,15 +41,19 @@ def render_assessment_history(nav_to_fn):
         filtered_sessions = [s for s in filtered_sessions if s.get("status") == "in_progress"]
 
     if student_filter:
-        filtered_sessions = [s for s in filtered_sessions if student_filter.lower() in s.get("student", {}).get("full_name", "").lower()]
+        filtered_sessions = [
+            s for s in filtered_sessions
+            if student_filter.lower() in (s.get("student_name") or s.get("student", {}).get("full_name", "")).lower()
+        ]
 
     # Table of Sessions
     table_data = []
     for s in filtered_sessions:
         st_info = s.get("student", {})
+        cand_name = s.get("student_name") or st_info.get("full_name") or s.get("student_id", "Unknown")
         table_data.append({
             "Session ID": s.get("id"),
-            "Candidate": st_info.get("full_name", "Unknown"),
+            "Candidate": cand_name,
             "Roll Number": st_info.get("roll_number") or "—",
             "Domain": s.get("domain"),
             "Difficulty": s.get("difficulty"),
@@ -71,7 +75,10 @@ def render_assessment_history(nav_to_fn):
     section_header("Detailed Session Report Inspection", "Select an interview session to view the final evaluation report")
     
     preselected_session = st.session_state.get("view_report_session_id")
-    sess_map = {f"{s.get('student', {}).get('full_name')} · {s.get('domain')} ({s.get('status')}) [ID: {s.get('id')}]": s.get("id") for s in filtered_sessions}
+    sess_map = {
+        f"{(s.get('student_name') or s.get('student', {}).get('full_name') or 'Candidate')} · {s.get('domain')} ({s.get('status')}) [ID: {s.get('id')}]": s.get("id")
+        for s in filtered_sessions
+    }
     
     default_idx = 0
     if preselected_session:

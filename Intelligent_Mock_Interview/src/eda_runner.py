@@ -31,7 +31,7 @@ from collections import Counter
 warnings.filterwarnings("ignore")
 
 # ── paths ─────────────────────────────────────────────────────────────────
-BASE   = r"c:\Users\Asus\OneDrive\Desktop\intelligent_supervised\Intelligent_Mock_Interview"
+BASE   = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 DS     = os.path.join(BASE, "dataset")
 FIGS   = os.path.join(BASE, "reports", "figures")
 REPORT = os.path.join(BASE, "reports", "eda_summary_report.txt")
