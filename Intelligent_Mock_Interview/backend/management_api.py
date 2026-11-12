@@ -190,6 +190,21 @@ def _response_dict(response: Optional[InterviewResponse]):
     if not response:
         return None
     text_assessment = response.text_assessment
+    audio_measurements = None
+    if response.audio_assessment:
+        try:
+            audio_measurements = json.loads(response.audio_assessment.measurements_json or "{}")
+        except (TypeError, json.JSONDecodeError):
+            audio_measurements = {}
+    # Multimodal/voice-assessment reports are persisted in audio_assessment.measurements_json by
+    # /api/interview/multimodal-report. Expose a normalized multimodal view for UI/report consumers.
+    multimodal_report = None
+    if isinstance(audio_measurements, dict) and (
+        "text_assessment" in audio_measurements or "voice_assessment" in audio_measurements or "multimodal_summary" in audio_measurements
+    ):
+        multimodal_report = audio_measurements
+        voice_metrics = audio_measurements.get("voice_assessment")
+        audio_measurements = voice_metrics if isinstance(voice_metrics, dict) else audio_measurements
     return {
         "id": response.id, "response_mode": response.response_mode,
         "answer_text": response.answer_text,
@@ -206,12 +221,14 @@ def _response_dict(response: Optional[InterviewResponse]):
             "quality_score": text_assessment.quality_score,
             "feedback": json.loads(text_assessment.feedback_json or "{}"),
         } if text_assessment else None),
-        "audio_measurements": (json.loads(response.audio_assessment.measurements_json or "{}")
-                               if response.audio_assessment else None),
+        "audio_measurements": audio_measurements,
+        "multimodal_report": multimodal_report,
     }
 
 
 def _session_dict(session: InterviewSession):
+    # Keep session status fields consistent with actual saved assessments when loading.
+    _sync_session_completion_state(session)
     questions = []
     for item in session.questions:
         response_by_mode = {r.response_mode: r for r in item.responses}
@@ -532,6 +549,75 @@ def complete_session(session_id: str):
         return {"id": session.id, "status": session.status, "completed_at": session.completed_at}
 
 
+def _mode_assessment_complete(session: InterviewSession, mode: str) -> bool:
+    """Return True only when every session question has the required saved assessment for mode."""
+    if mode not in {"text", "voice"}:
+        return False
+    if getattr(session, f"{mode}_status") == "not_required":
+        return True
+    for item in session.questions:
+        response = next((r for r in item.responses if r.response_mode == mode), None)
+        if not response:
+            return False
+        if mode == "text":
+            has_text = bool((response.answer_text or "").strip() or (response.corrected_transcript or "").strip())
+            if not has_text or not response.text_assessment:
+                return False
+        else:
+            measurements = None
+            if response.audio_assessment:
+                try:
+                    measurements = json.loads(response.audio_assessment.measurements_json or "{}")
+                except (TypeError, json.JSONDecodeError):
+                    measurements = {}
+            has_voice = bool((response.corrected_transcript or "").strip() or (response.original_transcript or "").strip() or measurements)
+            if not has_voice or not response.audio_assessment:
+                return False
+    return True
+
+
+def _sync_session_completion_state(session: InterviewSession) -> dict:
+    """Recompute mode/session completion from persisted assessment records (source of truth)."""
+    changed = False
+    for mode in ("text", "voice"):
+        status_attr = f"{mode}_status"
+        current = getattr(session, status_attr)
+        if current == "not_required":
+            continue
+        if _mode_assessment_complete(session, mode):
+            if current != "completed":
+                setattr(session, status_attr, "completed")
+                changed = True
+        elif current == "completed":
+            # Do not invent completion; only downgrade impossible completed states.
+            setattr(session, status_attr, "in_progress")
+            changed = True
+        elif current == "pending":
+            # Promote pending -> in_progress when any valid response exists for the mode.
+            for item in session.questions:
+                response = next((r for r in item.responses if r.response_mode == mode), None)
+                has_any = bool(response and ((response.answer_text or "").strip() or (response.corrected_transcript or "").strip() or (response.original_transcript or "").strip() or response.audio_assessment or response.text_assessment))
+                if has_any:
+                    setattr(session, status_attr, "in_progress")
+                    changed = True
+                    break
+    modes_complete = all(getattr(session, f"{name}_status") in {"completed", "not_required"} for name in ("text", "voice"))
+    if modes_complete:
+        if session.status not in {"ready_for_report", "completed"}:
+            session.status = "ready_for_report"
+            changed = True
+    elif session.status == "ready_for_report":
+        session.status = "in_progress"
+        changed = True
+    return {
+        "changed": changed,
+        "text_status": session.text_status,
+        "voice_status": session.voice_status,
+        "session_status": session.status,
+        "modes_complete": modes_complete,
+    }
+
+
 @router.post("/sessions/{session_id}/modes/{mode}/complete")
 def complete_assessment_mode(session_id: str, mode: str):
     if mode not in {"text", "voice"}:
@@ -541,26 +627,107 @@ def complete_assessment_mode(session_id: str, mode: str):
         mode_status = getattr(session, f"{mode}_status")
         if mode_status == "not_required":
             raise HTTPException(409, f"The {mode} mode is not part of this assessment.")
-        for item in session.questions:
-            response = next((r for r in item.responses if r.response_mode == mode), None)
-            if not response:
-                raise HTTPException(409, f"Question {item.position} has no saved {mode} response.")
-            if mode == "text" and not response.text_assessment:
-                raise HTTPException(409, f"Question {item.position} has not been text assessed.")
-            if mode == "voice" and not response.audio_assessment:
-                raise HTTPException(409, f"Question {item.position} has no saved voice analysis.")
-        setattr(session, f"{mode}_status", "completed")
-        if all(getattr(session, f"{name}_status") in {"completed", "not_required"} for name in ("text", "voice")):
-            session.status = "ready_for_report"
+        state = _sync_session_completion_state(session)
+        if not _mode_assessment_complete(session, mode):
+            missing = []
+            for item in session.questions:
+                response = next((r for r in item.responses if r.response_mode == mode), None)
+                if not response:
+                    missing.append(f"Q{item.position}: no saved {mode} response")
+                    continue
+                if mode == "text" and not response.text_assessment:
+                    missing.append(f"Q{item.position}: text assessment missing")
+                if mode == "voice" and not response.audio_assessment:
+                    missing.append(f"Q{item.position}: voice analysis missing")
+            detail = "Complete every required question assessment before finalizing this mode."
+            if missing:
+                detail = detail + " Missing: " + "; ".join(missing[:5])
+                if len(missing) > 5:
+                    detail += f" (+{len(missing) - 5} more)"
+            raise HTTPException(409, detail)
         return {"session_id": session.id, "mode": mode, "status": "completed",
                 "text_status": session.text_status, "voice_status": session.voice_status,
-                "session_status": session.status}
+                "session_status": session.status, "synced": state["changed"]}
+
+
+def _safe_json_dict(raw, default=None):
+    if raw is None:
+        return {} if default is None else default
+    try:
+        val = json.loads(raw) if isinstance(raw, str) else raw
+        return val if isinstance(val, dict) else ({} if default is None else default)
+    except Exception:
+        return {} if default is None else default
+
+
+def _finite_score(value):
+    if isinstance(value, bool) or value is None:
+        return None
+    if isinstance(value, (int, float)) and math.isfinite(float(value)):
+        return float(value)
+    return None
+
+
+def _voice_feedback_from_measurements(m: dict) -> tuple[list[str], list[str], list[str]]:
+    strengths, improvements, observations = [], [], []
+    if not isinstance(m, dict) or not m:
+        return strengths, improvements, ["No saved voice/audio analysis measurements are available."]
+    pause = _finite_score(m.get("pause_ratio"))
+    dur = _finite_score(m.get("duration_sec"))
+    speak = _finite_score(m.get("speaking_duration_sec"))
+    pace = _finite_score(m.get("speaking_rate_wpm"))
+    pitch = _finite_score(m.get("mean_pitch_hz"))
+    pitch_var = _finite_score(m.get("pitch_std_hz"))
+    energy = _finite_score(m.get("mean_energy_rms"))
+    fillers = m.get("filler_word_count")
+    if dur is not None:
+        observations.append(f"Recording duration: {dur:.1f}s (speech: {speak:.1f}s)." if speak is not None else f"Recording duration: {dur:.1f}s.")
+    if pause is not None:
+        if pause > 0.35:
+            improvements.append("High measured pause/silence ratio; practice smoother transitions between points.")
+        elif pause < 0.08:
+            improvements.append("Very low pause ratio measured; add brief pauses to improve clarity.")
+        else:
+            strengths.append("Measured pause/silence ratio is within a balanced range.")
+    if isinstance(fillers, int):
+        if fillers > 0:
+            improvements.append(f"{fillers} filler-word occurrence(s) detected in the transcript.")
+        else:
+            strengths.append("No configured filler words detected in the transcript.")
+    elif fillers is None and pace is not None:
+        observations.append(f"Estimated speaking pace: {pace:.0f} WPM.")
+    if pace is not None:
+        if 110 <= pace <= 170:
+            strengths.append("Speaking pace is within a common conversational range.")
+        elif pace < 90:
+            improvements.append("Speaking pace measured slower than typical; aim for steady pacing if comfortable.")
+        elif pace > 190:
+            improvements.append("Speaking pace measured faster than typical; consider brief pauses for clarity.")
+    if pitch is None:
+        observations.append("Pitch (F0) was not reliably detected (unvoiced/insufficient signal).")
+    else:
+        observations.append(f"Mean pitch: {pitch:.1f} Hz; pitch variation: {pitch_var:.1f} Hz." if pitch_var is not None else f"Mean pitch: {pitch:.1f} Hz.")
+        if pitch_var is not None and pitch_var >= 12:
+            strengths.append("Measurable pitch variation detected (descriptive acoustic signal).")
+    if energy is not None:
+        observations.append(f"Mean RMS energy: {energy:.4f}.")
+    if not strengths and not improvements and len(observations) <= 1:
+        observations.append("Acoustic measurements were saved; interpret them as descriptive signals only.")
+    # de-duplicate preserving order
+    def _uniq(items):
+        out=[]; seen=set()
+        for x in items:
+            if x and x not in seen:
+                seen.add(x); out.append(x)
+        return out
+    return _uniq(strengths), _uniq(improvements), _uniq(observations)
 
 
 def _make_final_report(session: InterviewSession, version: int) -> dict:
     results = []
     text_scores, recommendations = [], []
     text_available = voice_available = 0
+    voice_scores = []
     answered = 0
     completed_mode_responses = 0
     required_mode_count = int(session.text_status != "not_required") + int(session.voice_status != "not_required")
@@ -568,68 +735,159 @@ def _make_final_report(session: InterviewSession, version: int) -> dict:
         by_mode = {r.response_mode: r for r in item.responses}
         text_response, voice_response = by_mode.get("text"), by_mode.get("voice")
         text_assessment = text_response.text_assessment if text_response else None
-        voice_measurements = None
+
+        raw_voice_measurements = None
+        multimodal_saved = None
         if voice_response and voice_response.audio_assessment:
-            try:
-                voice_measurements = json.loads(voice_response.audio_assessment.measurements_json or "{}")
-            except (TypeError, json.JSONDecodeError):
-                voice_measurements = {}
+            raw_voice_measurements = _safe_json_dict(voice_response.audio_assessment.measurements_json)
+            if isinstance(raw_voice_measurements, dict) and ("text_assessment" in raw_voice_measurements or "voice_assessment" in raw_voice_measurements or "multimodal_summary" in raw_voice_measurements):
+                multimodal_saved = raw_voice_measurements
+                vm = raw_voice_measurements.get("voice_assessment")
+                raw_voice_measurements = vm if isinstance(vm, dict) else {}
+
         transcript = voice_response.corrected_transcript if voice_response else None
         original = voice_response.original_transcript if voice_response else None
         has_text = bool(text_response and (text_response.answer_text or "").strip())
-        has_voice = bool(voice_response and ((transcript or "").strip() or voice_measurements))
+        has_voice = bool(voice_response and ((transcript or "").strip() or (original or "").strip() or raw_voice_measurements or voice_response.audio_assessment))
         answered += int(has_text or has_voice)
         if session.text_status != "not_required":
-            completed_mode_responses += int(has_text)
+            completed_mode_responses += int(bool(text_response and text_response.text_assessment and has_text))
         if session.voice_status != "not_required":
-            completed_mode_responses += int(has_voice)
+            completed_mode_responses += int(bool(voice_response and voice_response.audio_assessment and has_voice))
+
+        text_feedback = _safe_json_dict(text_assessment.feedback_json) if text_assessment else {}
+        text_score_val = _finite_score(text_assessment.quality_score) if text_assessment else None
         if text_assessment:
             text_available += 1
-            if isinstance(text_assessment.quality_score, (int, float)) and math.isfinite(float(text_assessment.quality_score)):
-                text_scores.append(float(text_assessment.quality_score))
-            try:
-                feedback = json.loads(text_assessment.feedback_json or "{}")
-            except (TypeError, json.JSONDecodeError):
-                feedback = {}
-            recommendations.extend(feedback.get("improvements", []))
-        else:
-            feedback = {}
-        if has_voice:
+            if text_score_val is not None:
+                text_scores.append(text_score_val)
+            recommendations.extend(text_feedback.get("improvements", []) or [])
+
+        voice_strengths, voice_improvements, voice_observations = _voice_feedback_from_measurements(raw_voice_measurements or {})
+        if multimodal_saved and isinstance(multimodal_saved.get("feedback"), dict):
+            fb = multimodal_saved["feedback"]
+            for s in (fb.get("strengths") or []):
+                if s and s not in voice_strengths: voice_strengths.append(s)
+            for s in (fb.get("areas_for_improvement") or []):
+                if s and s not in voice_improvements: voice_improvements.append(s)
+        voice_text_assessment = None
+        if multimodal_saved and isinstance(multimodal_saved.get("text_assessment"), dict):
+            voice_text_assessment = multimodal_saved.get("text_assessment")
+        elif voice_response and voice_response.text_assessment:
+            vta = voice_response.text_assessment
+            voice_text_assessment = {
+                "quality_score": _finite_score(vta.quality_score),
+                "relevance_score": _finite_score(vta.relevance_score),
+                "question_alignment_score": _finite_score(vta.question_alignment_score),
+                "keyword_overlap": _finite_score(vta.keyword_overlap),
+                "structure_score": _finite_score(vta.structure_score),
+                "feedback": _safe_json_dict(vta.feedback_json),
+            }
+
+        # Question-level multimodal composite (preserve existing workspace formula when both sides exist)
+        q_text_score = None
+        if isinstance(voice_text_assessment, dict):
+            q_text_score = _finite_score(voice_text_assessment.get("quality_score"))
+        elif text_score_val is not None and has_voice:
+            q_text_score = text_score_val
+        q_voice_composite = None
+        if q_text_score is not None and isinstance(raw_voice_measurements, dict) and raw_voice_measurements:
+            pause_r = _finite_score(raw_voice_measurements.get("pause_ratio"))
+            pitch_std = _finite_score(raw_voice_measurements.get("pitch_std_hz"))
+            fluency_norm = max(0.0, min(1.0, 1.0 - (pause_r if pause_r is not None else 0.15)))
+            prosody_norm = max(0.0, min(1.0, (pitch_std if pitch_std is not None else 15.0) / 50.0))
+            q_voice_composite = round(0.50 * q_text_score + 0.25 * fluency_norm + 0.25 * prosody_norm, 4)
+            voice_scores.append(q_voice_composite)
+
+        if has_voice or raw_voice_measurements or multimodal_saved:
             voice_available += 1
+
+        # pick best text representation for question (prefer written text mode; include voice transcript assessment context separately)
+        strengths = text_feedback.get("strengths", []) if isinstance(text_feedback, dict) else []
+        improvements = text_feedback.get("improvements", []) if isinstance(text_feedback, dict) else []
         result = {
             "position": item.position,
             "question_id": item.question_id,
             "question": item.question.question_text,
             "text": {
                 "answer": text_response.answer_text if text_response else None,
-                "strengths": feedback.get("strengths", []),
-                "improvement_areas": feedback.get("improvements", []),
+                "strengths": strengths,
+                "improvement_areas": improvements,
                 "assessment": ({
-                    "score": text_assessment.quality_score,
-                    "cosine_similarity": text_assessment.relevance_score,
-                    "question_alignment": text_assessment.question_alignment_score,
-                    "jaccard_similarity": text_assessment.keyword_overlap,
-                    "structure_score": text_assessment.structure_score,
-                    "feedback": feedback,
+                    "score": text_score_val,
+                    "cosine_similarity": _finite_score(text_assessment.relevance_score),
+                    "question_alignment": _finite_score(text_assessment.question_alignment_score),
+                    "jaccard_similarity": _finite_score(text_assessment.keyword_overlap),
+                    "structure_score": _finite_score(text_assessment.structure_score),
+                    "feedback": text_feedback,
                 } if text_assessment else None),
             },
             "voice": {
                 "original_transcript": original,
                 "corrected_transcript": transcript,
-                "audio_file_retained": False,
-                "measurements": voice_measurements,
+                "audio_file_retained": bool(getattr(voice_response, "audio_retained", False)) if voice_response else False,
+                "audio_file_name": getattr(voice_response, "audio_file_name", None) if voice_response else None,
+                "measurements": raw_voice_measurements or {},
+                "voice_text_assessment": voice_text_assessment,
+                "strengths": voice_strengths,
+                "improvement_areas": voice_improvements,
+                "observations": voice_observations,
+            },
+            "multimodal": {
+                "text_score": q_text_score,
+                "voice_composite_score": q_voice_composite,
+                "formula": "0.50 × TextQuality + 0.25 × Fluency(1-pause_ratio) + 0.25 × Prosody(pitch_std_hz/50)" if q_voice_composite is not None else None,
+                "status": "available" if q_voice_composite is not None else ("partial" if has_voice or has_text else "not_available"),
+                "notes": [n for n in [
+                    "Uses saved transcript text assessment and saved acoustic measurements." if q_voice_composite is not None else None,
+                    "No validated common scale with employability/psychometrics; practice-only composite." if q_voice_composite is not None else None,
+                ] if n],
             },
             "status": item.status,
-            "observation": ("Text assessment and measured voice features are available." if text_assessment and has_voice
-                            else "Text assessment is available; voice analysis is pending." if text_assessment
-                            else "Voice analysis is available; text assessment is pending." if has_voice
+            "observation": ("Text assessment and saved voice/audio analysis are available." if (text_assessment and (has_voice or raw_voice_measurements))
+                            else "Text assessment is available; voice/audio analysis is pending." if text_assessment
+                            else "Voice/audio analysis is available; text assessment is pending." if (has_voice or raw_voice_measurements)
                             else "No saved response is available for this question."),
         }
         results.append(result)
+
     total = len(results)
     text_state = session.text_status
     voice_state = session.voice_status
     modes_complete = all(value in {"completed", "not_required"} for value in (text_state, voice_state))
+
+    overall_multimodal = None
+    if text_scores and voice_scores:
+        overall_multimodal = round(0.5 * (sum(text_scores) / len(text_scores)) + 0.5 * (sum(voice_scores) / len(voice_scores)), 4)
+    elif voice_scores:
+        overall_multimodal = round(sum(voice_scores) / len(voice_scores), 4)
+    elif text_scores and session.mode in {"mixed"} and session.voice_status != "not_required":
+        overall_multimodal = None
+
+    # collect recommendations from voice question feedback too
+    for r in results:
+        recommendations.extend((r.get("voice") or {}).get("improvement_areas") or [])
+    uniq_recs = []
+    seen = set()
+    for rec in recommendations:
+        if rec and rec not in seen:
+            seen.add(rec); uniq_recs.append(rec)
+
+    strengths_all, weaknesses_all = [], []
+    for r in results:
+        strengths_all.extend((r.get("text") or {}).get("strengths") or [])
+        strengths_all.extend((r.get("voice") or {}).get("strengths") or [])
+        weaknesses_all.extend((r.get("text") or {}).get("improvement_areas") or [])
+        weaknesses_all.extend((r.get("voice") or {}).get("improvement_areas") or [])
+    def _dedupe(items):
+        out=[]; s=set()
+        for i in items:
+            if i and i not in s:
+                s.add(i); out.append(i)
+        return out[:12]
+
+    avg_text = round(sum(text_scores) / len(text_scores), 4) if text_scores else None
+    avg_voice = round(sum(voice_scores) / len(voice_scores), 4) if voice_scores else None
     return {
         "report_type": "Student Interview Assessment Report",
         "report_version": version,
@@ -647,44 +905,102 @@ def _make_final_report(session: InterviewSession, version: int) -> dict:
             "total_questions": total, "answered_questions": answered,
             "completed_mode_responses": completed_mode_responses,
             "required_mode_responses": total * required_mode_count,
-            "completion_percentage": round(completed_mode_responses * 100 / (total * required_mode_count), 1) if total and required_mode_count else 0,
+            "completion_percentage": round(completed_mode_responses * 100 / (total * required_mode_count), 1) if total and required_mode_count else 0.0,
             "text_status": text_state, "voice_status": voice_state,
             "interview_status": "completed" if modes_complete else "in_progress",
         },
         "text_assessment": {
             "status": text_state,
-            "average_text_assessment_score": round(sum(text_scores) / len(text_scores), 4) if text_scores else None,
+            "average_text_assessment_score": avg_text,
             "score_formula": "0.50 * TF-IDF reference cosine + 0.20 * TF-IDF question cosine + 0.15 * Jaccard keyword overlap + 0.15 * answer structure heuristic",
             "score_limitation": "Practice heuristic; not calibrated against human ratings or intended as a hiring decision.",
             "questions_assessed": text_available,
         },
         "voice_assessment": {
-            "status": voice_state, "questions_with_voice_analysis": voice_available,
-            "score_note": "Acoustic measurements are descriptive and are not converted into a voice quality score.",
+            "status": voice_state,
+            "questions_with_voice_analysis": voice_available,
+            "average_multimodal_voice_score": avg_voice,
+            "score_note": "Acoustic measurements are descriptive. Where a question-level composite is shown, it uses the existing deterministic practice formula (text + pause-ratio fluency proxy + pitch-variation prosody proxy). No emotion/confidence model is invented.",
         },
         "question_results": results,
         "multimodal_summary": {
-            "combined_numeric_score": None,
-            "explanation": "No validated common scale exists for combining the text heuristic with raw acoustic measurements. They are presented independently.",
+            "combined_numeric_score": overall_multimodal,
+            "text_score": avg_text,
+            "voice_score": avg_voice,
+            "explanation": (
+                "Combined score averages available per-question practice composites (and/or available text scores) using saved assessments only."
+                if overall_multimodal is not None else
+                "A single combined numeric score is shown only when compatible saved text and/or voice-question composites are available; otherwise results are presented per question/mode without fabrication."
+            ),
             "observations": [item["observation"] for item in results],
-            "recommendations": list(dict.fromkeys(recommendations)),
+            "strengths": _dedupe(strengths_all),
+            "weaknesses": _dedupe(weaknesses_all),
+            "recommendations": uniq_recs[:12] or ["Continue practicing clear explanations with examples and review each question's feedback."],
         },
         "final_conclusion": {
             "status": "completed" if modes_complete else "in_progress",
-            "summary": f"{answered} of {total} questions have saved responses; text and voice findings remain separate.",
-            "next_steps": list(dict.fromkeys(recommendations)) or ["Continue practicing clear explanations with examples and review each question's feedback."],
+            "summary": f"{answered} of {total} questions have saved responses. Required assessment modes: text={text_state}, voice={voice_state}.",
+            "next_steps": uniq_recs[:8] or ["Continue practicing clear explanations with examples and review each question's feedback."],
         },
     }
+
+
+def _get_latest_report_record(db, session_id: str):
+    return db.scalar(
+        select(AssessmentReport)
+        .where(AssessmentReport.session_id == session_id)
+        .order_by(AssessmentReport.version.desc(), AssessmentReport.id.desc())
+    )
+
+
+def _report_response(record: AssessmentReport, report: Optional[dict] = None):
+    payload = report if report is not None else json.loads(record.report_json)
+    return {"id": record.id, "session_id": record.session_id, "student_id": record.student_id,
+            "version": record.version, "created_at": record.created_at, "report": payload}
 
 
 @router.get("/sessions/{session_id}/reports/final")
 @router.post("/sessions/{session_id}/reports/final")
 @router.post("/sessions/{session_id}/final-report")
-def create_final_report(session_id: str):
+def create_final_report(session_id: str, regenerate: bool = Query(False)):
     with db_session() as db:
         session = _get_session(db, session_id)
-        if not all(getattr(session, f"{name}_status") in {"completed", "not_required"} for name in ("text", "voice")):
-            raise HTTPException(409, "Complete every assessment mode in this session before generating the final report.")
+        _sync_session_completion_state(session)
+
+        # Reopen path: allow fetching a previously generated report without duplicates.
+        existing = _get_latest_report_record(db, session_id)
+        if existing and (session.status == "completed" or not regenerate):
+            # If modes are complete (or report already exists for a completed session), return existing report.
+            modes_complete = all(getattr(session, f"{name}_status") in {"completed", "not_required"} for name in ("text", "voice"))
+            if session.status == "completed" or (modes_complete and not regenerate):
+                if session.status != "completed":
+                    session.status = "completed"
+                    session.completed_at = session.completed_at or utcnow()
+                db.flush()
+                return _report_response(existing)
+
+        modes_complete = all(getattr(session, f"{name}_status") in {"completed", "not_required"} for name in ("text", "voice"))
+        if not modes_complete:
+            missing = []
+            for mode in ("text", "voice"):
+                if getattr(session, f"{mode}_status") in {"completed", "not_required"}:
+                    continue
+                for item in session.questions:
+                    response = next((r for r in item.responses if r.response_mode == mode), None)
+                    if not response:
+                        missing.append(f"{mode} Q{item.position}: response missing")
+                        continue
+                    if mode == "text" and not response.text_assessment:
+                        missing.append(f"text Q{item.position}: assessment missing")
+                    if mode == "voice" and not response.audio_assessment:
+                        missing.append(f"voice Q{item.position}: analysis missing")
+            detail = "Complete every assessment mode in this session before generating the final report."
+            if missing:
+                detail += " Missing: " + "; ".join(missing[:6])
+                if len(missing) > 6:
+                    detail += f" (+{len(missing) - 6} more)"
+            raise HTTPException(409, detail)
+
         previous_version = db.scalar(select(func.max(AssessmentReport.version)).where(AssessmentReport.session_id == session_id)) or 0
         report = _make_final_report(session, previous_version + 1)
         record = AssessmentReport(session_id=session.id, student_id=session.student_id,
@@ -693,8 +1009,7 @@ def create_final_report(session_id: str):
         db.add(record)
         session.status, session.completed_at = "completed", utcnow()
         db.flush()
-        return {"id": record.id, "session_id": session.id, "student_id": session.student_id,
-                "version": record.version, "created_at": record.created_at, "report": report}
+        return _report_response(record, report)
 
 
 @router.get("/sessions/{session_id}/reports")
@@ -939,29 +1254,6 @@ def persist_assessment(session_id: str, position: int, response_mode: str, repor
             db.add(audio)
         item.status = "assessed"
         session.current_position = position
-        # Advance mode status: pending -> in_progress -> completed when all questions in this mode are assessed
-        stage_field = f"{mode}_status"
-        current_stage = getattr(session, stage_field)
-        if current_stage == "pending":
-            setattr(session, stage_field, "in_progress")
-        # Check if all questions in this mode now have assessments
-        all_assessed = True
-        for item_check in session.questions:
-            resp = next((r for r in item_check.responses if r.response_mode == mode), None)
-            if mode == "text":
-                if not resp or not resp.text_assessment:
-                    all_assessed = False
-                    break
-            else:  # voice
-                if not resp or not resp.audio_assessment:
-                    all_assessed = False
-                    break
-        if all_assessed and current_stage in ("pending", "in_progress"):
-            setattr(session, stage_field, "completed")
-        # Sync session-level status
-        if all(
-            getattr(session, f"{name}_status") in {"completed", "not_required"}
-            for name in ("text", "voice")
-        ):
-            session.status = "ready_for_report"
+        # Advance mode status and sync from actual persisted assessments (source of truth)
+        _sync_session_completion_state(session)
         db.flush()

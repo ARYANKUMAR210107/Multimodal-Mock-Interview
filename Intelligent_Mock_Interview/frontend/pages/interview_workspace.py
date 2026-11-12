@@ -626,14 +626,19 @@ def render_interview_workspace(nav_to_fn):
         with f1:
             assessed_cnt = sum(1 for q in questions if q.get("status") == "assessed")
             st.markdown(f"**Interview Completion Status:** `{assessed_cnt} of {total_q}` questions assessed.")
-            st.caption("When you have evaluated all questions, generate the final comprehensive report.")
+            st.caption(
+                f"Assessment mode status — Text: `{session.get('text_status', '—')}` · Voice: `{session.get('voice_status', '—')}` · Session: `{session.get('status', '—')}`. "
+                "The final report is generated from saved assessment records when required modes are complete."
+            )
         with f2:
             if st.button("🏁 Finalize & View Report ➔", type="primary", use_container_width=True):
-                with st.spinner("Compiling full session report across all interview responses…"):
+                with st.spinner("Checking saved assessments and generating/opening the final report…"):
                     ok, rep = client.create_final_report(session_id)
                     if ok:
                         st.session_state["view_report_session_id"] = session_id
+                        st.success("Final report is ready.")
                         nav_to_fn("Assessment History")
                     else:
-                        st.error(f"Failed to generate final report: {rep}")
+                        st.error(f"Could not generate final report: {rep}")
+                        st.caption("If assessments were saved earlier, the system will re-check completion from stored records. Ensure required text/voice assessments exist for every question in this session.")
 
