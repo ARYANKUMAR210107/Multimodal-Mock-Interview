@@ -12,14 +12,32 @@ import requests
 import streamlit as st
 from typing import Any, Dict, List, Optional, Tuple
 
-API_BASE_URL = os.getenv("MOCK_INTERVIEW_API_URL", "http://127.0.0.1:8000").rstrip("/")
+def _resolve_api_base_url() -> str:
+    """Resolve backend API base URL with Streamlit secrets, env vars, and local fallback."""
+    try:
+        if hasattr(st, "secrets") and st.secrets:
+            for key in ("MOCK_INTERVIEW_API_URL", "API_BASE_URL", "BACKEND_URL"):
+                if key in st.secrets and st.secrets[key]:
+                    return str(st.secrets[key]).strip().rstrip("/")
+    except Exception:
+        pass
+
+    for env_key in ("MOCK_INTERVIEW_API_URL", "API_BASE_URL", "BACKEND_URL"):
+        val = os.getenv(env_key)
+        if val and val.strip():
+            return val.strip().rstrip("/")
+
+    return "http://127.0.0.1:8000"
+
+
+API_BASE_URL = _resolve_api_base_url()
 DEFAULT_TIMEOUT = 30.0
 UPLOAD_TIMEOUT = 90.0
 
 
 class APIClient:
-    def __init__(self, base_url: str = API_BASE_URL):
-        self.base_url = base_url
+    def __init__(self, base_url: Optional[str] = None):
+        self.base_url = (base_url or _resolve_api_base_url()).rstrip("/")
 
     def _url(self, path: str) -> str:
         return f"{self.base_url}{path}" if path.startswith("/") else f"{self.base_url}/{path}"

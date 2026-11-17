@@ -34,7 +34,21 @@ from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship,
 PROJECT_DIR = Path(__file__).resolve().parents[1]
 DEFAULT_DB_PATH = PROJECT_DIR / "data" / "interviewai.sqlite3"
 DEFAULT_DATABASE_URL = f"sqlite:///{DEFAULT_DB_PATH.as_posix()}"
-DATABASE_URL = os.getenv("INTERVIEWAI_DATABASE_URL", DEFAULT_DATABASE_URL)
+
+
+def normalize_database_url(url: Optional[str] = None) -> str:
+    """Normalize database connection URLs for SQLite and PostgreSQL (Neon/Render)."""
+    raw_url = (url or "").strip()
+    if not raw_url:
+        raw_url = os.getenv("INTERVIEWAI_DATABASE_URL") or os.getenv("DATABASE_URL") or DEFAULT_DATABASE_URL
+    if raw_url.startswith("postgres://"):
+        raw_url = "postgresql+psycopg2://" + raw_url[len("postgres://"):]
+    elif raw_url.startswith("postgresql://") and not raw_url.startswith("postgresql+"):
+        raw_url = "postgresql+psycopg2://" + raw_url[len("postgresql://"):]
+    return raw_url
+
+
+DATABASE_URL = normalize_database_url()
 
 
 class Base(DeclarativeBase):
@@ -266,6 +280,7 @@ class AssessmentReport(Base):
 
 
 def _make_engine(database_url: str) -> Engine:
+    database_url = normalize_database_url(database_url)
     if database_url.startswith("sqlite:///"):
         db_path = database_url.removeprefix("sqlite:///")
         if db_path != ":memory:":
@@ -291,7 +306,7 @@ def configure_database(database_url: Optional[str] = None) -> None:
     global DATABASE_URL, engine, SessionLocal
     if engine:
         engine.dispose()
-    DATABASE_URL = database_url or DEFAULT_DATABASE_URL
+    DATABASE_URL = normalize_database_url(database_url)
     engine = _make_engine(DATABASE_URL)
     SessionLocal = sessionmaker(bind=engine, autoflush=False, expire_on_commit=False)
 

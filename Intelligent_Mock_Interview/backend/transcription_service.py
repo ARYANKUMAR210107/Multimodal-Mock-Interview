@@ -76,7 +76,6 @@ class TranscriptionService:
     def _transcribe_subprocess(self, audio_path: str, language: Optional[str] = None, prompt: Optional[str] = None) -> Optional[Dict[str, Any]]:
         candidate_pythons = [
             os.getenv("WHISPER_PYTHON_PATH", ""),
-            r"C:\Users\babul\Desktop\Botbro-Local-AI-Desktop-Orchestration-System\activate\Scripts\python.exe",
             sys.executable,
         ]
         base_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))

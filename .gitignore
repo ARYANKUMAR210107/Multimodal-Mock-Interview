@@ -26,3 +26,7 @@ skills-lock.json
 data/tts_cache/
 Intelligent_Mock_Interview/data/tts_cache/
 *.log
+
+# Local notes
+*cmd.txt
+

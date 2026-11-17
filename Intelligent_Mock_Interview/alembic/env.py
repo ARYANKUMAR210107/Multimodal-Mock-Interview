@@ -12,15 +12,16 @@ _PROJECT_DIR = str(Path(__file__).resolve().parent.parent)
 if _PROJECT_DIR not in sys.path:
     sys.path.insert(0, _PROJECT_DIR)
 
-from src.database import Base, DATABASE_URL  # noqa: E402
+from src.database import Base, DATABASE_URL, normalize_database_url  # noqa: E402
 
 # this is the Alembic Config object, which provides
 # access to the values within the .ini file in use.
 config = context.config
-# Use the same database URL as the application
+# Use the same database URL as the application (normalized for SQLite & Postgres)
+target_url = normalize_database_url(DATABASE_URL)
 config.set_main_option(
     "sqlalchemy.url",
-    DATABASE_URL.replace("%", "%%")
+    target_url.replace("%", "%%")
 )
 
 # Interpret the config file for Python logging.
